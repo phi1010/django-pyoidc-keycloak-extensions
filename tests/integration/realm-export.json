@@ -1,0 +1,183 @@
+{
+  "realm": "testrealm",
+  "enabled": true,
+  "eventsEnabled": true,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "eventsExpiration": 86400,
+  "enabledEventTypes": [
+    "UPDATE_PROFILE",
+    "UPDATE_EMAIL",
+    "UPDATE_PASSWORD",
+    "VERIFY_EMAIL",
+    "REGISTER",
+    "LOGIN"
+  ],
+  "sslRequired": "none",
+  "clients": [
+    {
+      "clientId": "django-app",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "test-client-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true",
+        "standard.token.exchange.enableRefreshRequestedTokenType": "SAME_SESSION"
+      },
+      "redirectUris": [
+        "*"
+      ],
+      "webOrigins": [
+        "*"
+      ],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "groups",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "reports-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "django-app",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "reports-api",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "reports-secret",
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "defaultRoles": []
+    }
+  ],
+  "groups": [
+    {
+      "name": "staff",
+      "path": "/staff",
+      "subGroups": [
+        {
+          "name": "support",
+          "path": "/staff/support",
+          "subGroups": []
+        }
+      ]
+    },
+    {
+      "name": "contractors",
+      "path": "/contractors",
+      "subGroups": []
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@example.org",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Jones",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alice-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/staff"
+      ],
+      "clientRoles": {
+        "reports-api": [
+          "reader"
+        ]
+      }
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@example.org",
+      "firstName": "Bob",
+      "lastName": "Smith",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bob-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/contractors"
+      ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@example.org",
+      "firstName": "Carol",
+      "lastName": "White",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "carol-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "service-account-django-app",
+      "enabled": true,
+      "serviceAccountClientId": "django-app",
+      "clientRoles": {
+        "realm-management": [
+          "view-users",
+          "query-users",
+          "query-groups",
+          "view-events",
+          "view-realm",
+          "manage-users",
+          "manage-events"
+        ]
+      }
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "app-staff"
+      },
+      {
+        "name": "app-admin"
+      }
+    ],
+    "client": {
+      "reports-api": [
+        {
+          "name": "reader",
+          "description": "Lets a user's token be exchanged for this audience."
+        }
+      ]
+    }
+  },
+  "editUsernameAllowed": true
+}

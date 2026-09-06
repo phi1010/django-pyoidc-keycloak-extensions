@@ -1,0 +1,354 @@
+"""Token storage, lazy refresh and exchange."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import httpx
+import pytest
+import respx
+from django.contrib.auth import get_user_model
+from django.db import connection as db_connection
+from django.utils import timezone
+from django_pyoidc.models import OIDCSession
+
+from django_pyoidc_keycloak.admin_api.exceptions import TokensUnavailable
+from django_pyoidc_keycloak.models import OIDCTokenSet
+from django_pyoidc_keycloak.tokens.exchange import exchange_access_token
+from django_pyoidc_keycloak.tokens.extract import RawTokens, extract_raw_tokens
+from django_pyoidc_keycloak.tokens.refresh import get_valid_access_token
+from django_pyoidc_keycloak.tokens.store import purge_for_session, purge_orphans, store_tokens
+
+pytestmark = pytest.mark.django_db
+
+TOKEN_URL = "https://sso.example.org/realms/demo/protocol/openid-connect/token"
+JWT = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.signature"
+
+
+@pytest.fixture
+def user():
+    return get_user_model().objects.create_user(username="alice")
+
+
+@pytest.fixture
+def session():
+    return OIDCSession.objects.create(state="s", sub="1", cache_session_key="k", session_state="ss")
+
+
+@pytest.fixture
+def token_set(user, session):
+    return store_tokens(
+        session=session,
+        user=user,
+        raw=RawTokens(
+            access_token=JWT,
+            id_token="id." + JWT,
+            refresh_token="refresh-token",
+            access_token_expires_at=datetime.now(tz=UTC) + timedelta(hours=1),
+            scope="openid profile",
+        ),
+    )
+
+
+# -- storage ------------------------------------------------------------
+
+
+def test_tokens_round_trip_through_the_encrypted_columns(token_set):
+    stored = OIDCTokenSet.objects.get(pk=token_set.pk)
+
+    assert stored.access_token == JWT
+    assert stored.refresh_token == "refresh-token"
+
+
+def test_the_columns_are_ciphertext_at_rest(token_set):
+    """Read past the ORM to prove the database itself holds no readable token."""
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT access_token, refresh_token FROM keycloak_oidctokenset")
+        raw = " ".join(str(value) for value in cursor.fetchone())
+
+    assert JWT not in raw
+    assert "refresh-token" not in raw
+
+
+def test_nothing_is_stored_when_there_are_no_tokens(user, session):
+    assert store_tokens(session=session, user=user, raw=RawTokens()) is None
+
+
+def test_logging_out_purges_the_tokens(token_set, session):
+    purge_for_session(session)
+
+    assert OIDCTokenSet.objects.count() == 0
+
+
+def test_deleting_the_session_cascades(token_set, session):
+    session.delete()
+
+    assert OIDCTokenSet.objects.count() == 0
+
+
+def test_expired_sets_are_purged(user, session):
+    store_tokens(
+        session=session,
+        user=user,
+        raw=RawTokens(access_token=JWT, refresh_token="r"),
+    )
+    OIDCTokenSet.objects.update(refresh_token_expires_at=timezone.now() - timedelta(days=1))
+
+    assert purge_orphans() == 1
+
+
+def test_the_string_form_reveals_nothing(token_set):
+    assert JWT not in str(token_set)
+    assert JWT not in repr(token_set)
+
+
+# -- extraction ---------------------------------------------------------
+
+
+class _Token:
+    """Stands in for a pyoidc Token object."""
+
+    def __init__(self):
+        self.access_token = JWT
+        self.refresh_token = "refresh-token"
+        self.id_token_jwt = "id." + JWT
+        self.token_expiration_time = int(datetime.now(tz=UTC).timestamp()) + 300
+        self.scope = ["openid", "profile"]
+
+
+class _Grant:
+    def __init__(self):
+        self.tokens = [_Token()]
+
+
+class _Consumer:
+    def __init__(self):
+        self.grant = {"state": _Grant()}
+
+
+class _Client:
+    def __init__(self):
+        self.consumer = _Consumer()
+
+
+def test_extracts_what_django_pyoidc_does_not_pass_on():
+    """The raw ID token and refresh token exist only on the pyoidc consumer."""
+    raw = extract_raw_tokens(_Client(), {"access_token_jwt": JWT})
+
+    assert raw.access_token == JWT
+    assert raw.refresh_token == "refresh-token"
+    assert raw.id_token == "id." + JWT
+    assert raw.scope == "openid profile"
+
+
+def test_extraction_never_raises_on_an_unexpected_client():
+    raw = extract_raw_tokens(object(), {"access_token_jwt": JWT})
+
+    assert raw.access_token == JWT
+    assert raw.refresh_token is None
+
+
+def test_the_raw_token_repr_lists_names_not_values():
+    raw = extract_raw_tokens(_Client(), {"access_token_jwt": JWT})
+
+    assert JWT not in repr(raw)
+    assert "access_token" in repr(raw)
+
+
+# -- refresh ------------------------------------------------------------
+
+
+def test_a_fresh_token_is_returned_without_any_http(token_set):
+    with respx.mock:
+        route = respx.post(TOKEN_URL)
+        assert get_valid_access_token(token_set) == JWT
+        assert route.call_count == 0
+
+
+@respx.mock
+def test_an_expiring_token_is_refreshed(token_set):
+    token_set.access_token_expires_at = timezone.now() + timedelta(seconds=5)
+    token_set.save()
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "new-token", "expires_in": 300}))
+
+    assert get_valid_access_token(token_set) == "new-token"
+
+
+@respx.mock
+def test_a_rotated_refresh_token_is_stored(token_set):
+    token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
+    token_set.save()
+    respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"access_token": "new", "expires_in": 300, "refresh_token": "rotated", "refresh_expires_in": 1800},
+        )
+    )
+
+    get_valid_access_token(token_set)
+
+    token_set.refresh_from_db()
+    assert token_set.refresh_token == "rotated"
+
+
+@respx.mock
+def test_a_rejected_refresh_token_drops_the_row(token_set):
+    token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
+    token_set.save()
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(400, json={"error": "invalid_grant"}))
+
+    with pytest.raises(TokensUnavailable, match="log in again"):
+        get_valid_access_token(token_set)
+
+    assert OIDCTokenSet.objects.count() == 0
+
+
+def test_without_a_refresh_token_the_caller_is_told(user, session):
+    token_set = store_tokens(
+        session=session,
+        user=user,
+        raw=RawTokens(access_token=JWT, access_token_expires_at=datetime.now(tz=UTC) - timedelta(seconds=1)),
+    )
+
+    with pytest.raises(TokensUnavailable, match="no refresh token"):
+        get_valid_access_token(token_set)
+
+
+def test_a_held_lock_stops_a_second_caller_from_refreshing(token_set):
+    """The mutex is what keeps two workers from both hitting Keycloak."""
+    from django.core.cache import cache
+
+    from django_pyoidc_keycloak.tokens.refresh import _lock_key
+
+    token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
+    token_set.save()
+
+    # Pretend another worker got there first and is mid-refresh.
+    cache.add(_lock_key(token_set), "someone-elses-nonce", 30)
+
+    # That worker finishes and writes the new token.
+    OIDCTokenSet.objects.filter(pk=token_set.pk).update(
+        access_token="new-token",
+        access_token_expires_at=timezone.now() + timedelta(minutes=5),
+    )
+
+    with respx.mock:
+        route = respx.post(TOKEN_URL)
+        assert get_valid_access_token(token_set) == "new-token"
+        assert route.call_count == 0, "the loser of the race must not refresh as well"
+
+
+def test_waiting_for_another_worker_eventually_gives_up(token_set, monkeypatch):
+    """A worker that crashed mid-refresh must not hang the request forever."""
+    from django.core.cache import cache
+
+    from django_pyoidc_keycloak.tokens import refresh as refresh_module
+
+    monkeypatch.setattr(refresh_module, "LOCK_WAIT_TOTAL", 0.3)
+    monkeypatch.setattr(refresh_module, "LOCK_POLL_INTERVAL", 0.05)
+    token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
+    token_set.save()
+    cache.add(refresh_module._lock_key(token_set), "someone-elses-nonce", 30)
+
+    with pytest.raises(TokensUnavailable, match="Timed out"):
+        get_valid_access_token(token_set)
+
+
+@respx.mock
+def test_the_lock_is_released_once_the_refresh_is_done(token_set):
+    from django.core.cache import cache
+
+    from django_pyoidc_keycloak.tokens.refresh import _lock_key
+
+    token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
+    token_set.save()
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "new-token", "expires_in": 300}))
+
+    get_valid_access_token(token_set)
+
+    assert cache.get(_lock_key(token_set)) is None
+
+
+@respx.mock
+def test_a_caller_never_releases_someone_elses_lock(token_set):
+    """Releasing by nonce, so a slow worker cannot unlock the next one's refresh."""
+    from django.core.cache import cache
+
+    from django_pyoidc_keycloak.tokens.refresh import _lock_key
+
+    token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
+    token_set.save()
+
+    def steal_the_lock(request):
+        cache.set(_lock_key(token_set), "a-newer-nonce", 30)
+        return httpx.Response(200, json={"access_token": "new-token", "expires_in": 300})
+
+    respx.post(TOKEN_URL).mock(side_effect=steal_the_lock)
+
+    get_valid_access_token(token_set)
+
+    assert cache.get(_lock_key(token_set)) == "a-newer-nonce"
+
+
+def test_the_mutex_stores_a_nonce_and_never_a_token(token_set, monkeypatch):
+    """Whatever ends up in the cache must not be a credential."""
+    from django.core.cache import cache
+
+    written: dict[str, object] = {}
+    original_add = cache.add
+
+    def spy_add(key, value, timeout=None, **kwargs):
+        written[key] = value
+        return original_add(key, value, timeout, **kwargs)
+
+    monkeypatch.setattr(cache, "add", spy_add)
+    token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
+    token_set.save()
+
+    with respx.mock:
+        respx.post(TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "new-token", "expires_in": 300})
+        )
+        get_valid_access_token(token_set)
+
+    assert written, "the lock was never taken"
+    for value in written.values():
+        assert "eyJ" not in str(value)
+        assert "refresh-token" not in str(value)
+        assert "new-token" not in str(value)
+
+
+# -- exchange -----------------------------------------------------------
+
+
+@respx.mock
+def test_exchange_uses_the_login_client_and_the_right_grant():
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "downstream"}))
+
+    assert exchange_access_token(JWT, audience="reports") == "downstream"
+
+    sent = respx.calls[0].request.content.decode()
+    assert "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange" in sent
+    assert "audience=reports" in sent
+    assert "client_id=django-app" in sent
+
+
+@respx.mock
+def test_a_refused_exchange_explains_the_keycloak_requirements():
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(403, text="not allowed"))
+
+    with pytest.raises(TokensUnavailable, match="Standard token exchange"):
+        exchange_access_token(JWT, audience="reports")
+
+
+@respx.mock
+def test_exchanged_tokens_are_never_cached():
+    from django.core.cache import cache
+
+    respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "downstream"}))
+
+    exchange_access_token(JWT, audience="reports")
+    exchange_access_token(JWT, audience="reports")
+
+    assert respx.calls.call_count == 2, "a cached exchange would have skipped the second call"
+    assert cache.get("keycloak:exchange:reports") is None

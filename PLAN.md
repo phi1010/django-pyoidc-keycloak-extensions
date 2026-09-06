@@ -304,12 +304,12 @@ Required roles on `realm-management`, assigned to the login client's service-acc
 documented in the README: `view-users`, `query-users`, `query-groups`, `view-events`, `view-realm`.
 
 One consequence of reusing the login client: Keycloak materialises a `service-account-<client_id>`
-user in the realm, which shows up in `GET /users`. **No special-casing** — it is synced like any
-other user, so with `IMPORT_ALL_USERS` on it gets an ordinary local account. That is deliberate and
-useful: it gives client-credentials (M2M) calls a real local user to attach to, matching the
-service-account handling django-pyoidc already has in `get_user_by_email` (`__init__.py:56-75`).
-It arrives with `is_staff=False` / `is_superuser=False` like any other synced user, so it carries no
-privilege unless the role mapping grants it.
+user in the realm. **Verified against a real Keycloak 26.4 during implementation: it does not appear
+in `GET /users`** -- Keycloak excludes service-account users from the listing entirely -- so
+reconciliation never sees it and no local account is created, with or without `IMPORT_ALL_USERS`.
+No special-casing is needed, and none would be possible. Such an account is only ever created if the
+service account actually logs in, which goes through `hook_get_user` like any other
+machine-to-machine login. Covered by an integration test that asserts both halves.
 
 ---
 
@@ -590,8 +590,8 @@ The scenario the test drives end to end:
    again and assert one was anonymized (with `keycloak_id` retained as a tombstone) and the other
    hard-deleted.
 6. Assert a locally created user with `keycloak_id IS NULL` survived every pass untouched, and that
-   with `IMPORT_ALL_USERS` enabled the `service-account-<client_id>` user was imported as an
-   ordinary account with no staff or superuser flag.
+   the `service-account-<client_id>` user is absent from `GET /users` and so is never imported,
+   even with `IMPORT_ALL_USERS` enabled.
 7. Add a manual membership with an `expires_at` in the past, reconcile, assert it was swept while a
    non-expiring manual membership survived.
 8. Drive a real OIDC login through django-pyoidc's callback view against the container and assert

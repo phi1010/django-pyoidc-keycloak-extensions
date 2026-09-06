@@ -1,5 +1,58 @@
 [project]
 name = "django-pyoidc-keycloak-extensions"
 version = "0.1.0"
+description = "Keycloak user/group synchronisation, encrypted token storage and token exchange for django-pyoidc"
+readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+license = { text = "MIT" }
+dependencies = [
+    "django>=5.2",
+    "django-pyoidc>=1.0.13",
+    "httpx>=0.27",
+    "django-fernet-encrypted-fields>=0.4.0",
+]
+
+[project.optional-dependencies]
+celery = ["celery>=5.4"]
+dev = [
+    "pytest>=8",
+    "pytest-django>=4.8",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "testcontainers>=4.8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "django-stubs>=5.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/django_pyoidc_keycloak"]
+
+[tool.ruff]
+line-length = 120
+src = ["src", "tests"]
+extend-exclude = ["*/migrations/*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "DJ", "N"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.testproject.settings"
+pythonpath = ["."]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]
+markers = ["integration: needs a real Keycloak container (Podman)"]
+# Integration tests are opt-in: run them with `pytest -m integration`.
+addopts = "-m 'not integration'"
+
+[tool.mypy]
+python_version = "3.14"
+plugins = ["mypy_django_plugin.main"]
+ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "tests.testproject.settings"
