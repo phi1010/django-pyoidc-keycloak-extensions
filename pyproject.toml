@@ -4,7 +4,23 @@ version = "0.1.0"
 description = "Keycloak user/group synchronisation, encrypted token storage and token exchange for django-pyoidc"
 readme = "README.md"
 requires-python = ">=3.14"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["django", "keycloak", "oidc", "sso", "token-exchange"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Framework :: Django :: 5.2",
+    "Framework :: Django :: 6.0",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: System :: Systems Administration :: Authentication/Directory",
+    "Typing :: Typed",
+]
 dependencies = [
     "django>=5.2",
     # No upper bound is set here so downstream projects can move at their own pace, but this
@@ -27,6 +43,11 @@ dev = [
     "django-stubs>=5.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/phi1010/django-pyoidc-keycloak-extensions"
+Source = "https://github.com/phi1010/django-pyoidc-keycloak-extensions"
+Issues = "https://github.com/phi1010/django-pyoidc-keycloak-extensions/issues"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -34,6 +55,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/django_pyoidc_keycloak"]
 artifacts = ["src/django_pyoidc_keycloak/templates/**"]
+
+[tool.hatch.build.targets.sdist]
+# Tests and the plan are worth shipping; IDE settings are not -- .idea/workspace.xml carries
+# local paths and personal state.
+include = ["src/", "tests/", "manage.py", "README.md", "PLAN.md", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 120

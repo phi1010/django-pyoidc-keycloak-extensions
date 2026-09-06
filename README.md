@@ -207,7 +207,7 @@ pin it in your own project and read its release notes before upgrading.
 ## Development
 
 ```bash
-uv pip install -e ".[dev,celery]"
+uv sync --extra dev --extra celery
 uv run pytest                  # unit tests
 uv run pytest -m integration   # against a real Keycloak in Podman
 ```
@@ -215,3 +215,29 @@ uv run pytest -m integration   # against a real Keycloak in Podman
 The integration suite starts `quay.io/keycloak/keycloak:26.4` through Podman's socket, imports
 a realm, and drives the full cycle: reconcile, mutate, poll, delete, refresh, exchange. It
 skips itself if Podman is not installed.
+
+## Releasing
+
+Publishing runs on GitHub Actions (`.github/workflows/publish.yml`) using PyPI **Trusted
+Publishing**, so there is no API token in repository secrets.
+
+One-time setup:
+
+1. On PyPI, add a *pending publisher* under the project's *Publishing* settings — owner
+   `phi1010`, repository `django-pyoidc-keycloak-extensions`, workflow `publish.yml`,
+   environment `pypi`. Repeat on TestPyPI with environment `testpypi` if you want a dry run.
+2. In the repository settings, create the `pypi` (and optionally `testpypi`) environments.
+   Adding required reviewers there puts a manual gate between the release and the upload.
+
+To release:
+
+1. Bump `version` in `pyproject.toml` and commit.
+2. Tag and push: `git tag v0.2.0 && git push --tags`.
+3. Publish a GitHub Release for that tag.
+
+The workflow re-runs lint, the unit tests and the migration check, refuses to publish if the
+tag and `pyproject.toml` disagree on the version, verifies the wheel actually contains the
+admin templates and migrations, uploads to PyPI, and attaches the artefacts to the release.
+
+`workflow_dispatch` publishes to TestPyPI by default, for rehearsing a release without
+burning a version number — PyPI uploads are immutable and a version can never be reused.

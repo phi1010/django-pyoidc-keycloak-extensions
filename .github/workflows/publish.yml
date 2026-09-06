@@ -1,0 +1,143 @@
+name: Publish to PyPI
+
+# Publishing is deliberately driven by a GitHub Release rather than a bare tag push: the
+# release is the human "yes, ship this", and it is hard to create by accident.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to publish
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  build:
+    name: Build and check the distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra celery
+
+      # Ship nothing that does not pass. A release is the wrong moment to discover a failure.
+      - name: Ruff (lint)
+        run: uv run ruff check src tests
+
+      - name: Ruff (format)
+        run: uv run ruff format --check src tests
+
+      - name: Unit tests
+        run: uv run pytest -q
+
+      - name: No missing migrations
+        run: uv run python manage.py makemigrations --check --dry-run
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: The tag must match the version in pyproject.toml
+        if: github.event_name == 'release'
+        run: |
+          # Otherwise the release notes and the published artefact disagree, and PyPI's
+          # immutability means the mistake cannot be taken back.
+          version="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "pyproject: $version | tag: $tag"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match version '$version' in pyproject.toml."
+            exit 1
+          fi
+
+      - name: The wheel must contain the admin templates
+        run: |
+          # They are not importable Python, so a packaging mistake would only show up as a
+          # missing "Sync now" button in someone else's project.
+          uv run python - <<'PY'
+          import pathlib, zipfile
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          names = zipfile.ZipFile(wheel).namelist()
+          expected = "django_pyoidc_keycloak/templates/admin/keycloak/keycloakuser/change_form.html"
+          assert expected in names, f"{expected} missing from {wheel.name}"
+          assert any(n.endswith("migrations/0001_initial.py") for n in names), "migrations missing"
+          print(f"{wheel.name}: templates and migrations present")
+          PY
+
+      - name: Check the metadata renders on PyPI
+        run: uvx twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/django-pyoidc-keycloak-extensions
+    permissions:
+      id-token: write  # Trusted Publishing: mints a short-lived OIDC token, no stored secret
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      # Add required reviewers to this environment in the repository settings if you want a
+      # second pair of eyes between the release and the upload.
+      name: pypi
+      url: https://pypi.org/p/django-pyoidc-keycloak-extensions
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  attach-to-release:
+    name: Attach the artefacts to the release
+    needs: publish-pypi
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
