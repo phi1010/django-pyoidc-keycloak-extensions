@@ -83,12 +83,6 @@ class GroupMembershipInline(admin.TabularInline):
     def get_readonly_fields(self, request: HttpRequest, obj: Any = None) -> tuple[str, ...]:
         return self.readonly_fields
 
-    def has_change_permission(self, request: HttpRequest, obj: Any = None) -> bool:
-        return True
-
-    def save_new_objects(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - Django internal
-        return super().save_new_objects(*args, **kwargs)
-
 
 @admin.register(KeycloakUser)
 class KeycloakUserAdmin(admin.ModelAdmin):
@@ -185,6 +179,22 @@ class KeycloakUserAdmin(admin.ModelAdmin):
                 self.message_user(request, str(exc), messages.ERROR)
 
         return HttpResponseRedirect(reverse("admin:keycloak_keycloakuser_change", args=[object_id]))
+
+    def save_formset(self, request: HttpRequest, form: Any, formset: Any, change: bool) -> None:
+        """Memberships added on this page are manual overrides, like those added on their own page.
+
+        Without this they would inherit no author and read as ordinary rows; the model default
+        already keeps synchronisation from revoking them.
+        """
+        instances = formset.save(commit=False)
+        for obj in formset.deleted_objects:
+            obj.delete()
+        for instance in instances:
+            if isinstance(instance, GroupMembership) and instance._state.adding:
+                instance.source = MembershipSource.MANUAL
+                instance.created_by = request.user
+            instance.save()
+        formset.save_m2m()
 
     def change_view(self, request: HttpRequest, object_id: str, form_url: str = "", extra_context: Any = None) -> Any:
         extra_context = extra_context or {}

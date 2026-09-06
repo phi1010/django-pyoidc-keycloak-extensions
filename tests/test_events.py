@@ -190,3 +190,22 @@ def test_the_two_streams_keep_separate_cursors(client_stub):
     poll_user_events(client=client_stub)
 
     assert SyncCursor.objects.filter(realm="demo").count() == 2
+
+
+def test_a_replayed_delete_does_not_hard_delete_a_tombstone(client_stub):
+    """The protecting row may be gone by then; the tombstone must still survive."""
+    representation = kc_user()
+    user = sync_user(representation, client=client_stub)
+    document = ProtectedDocument.objects.create(owner=user, title="an invoice")
+    event = admin_event(operationType="DELETE", resourcePath=f"users/{representation['id']}")
+
+    client_stub.get_admin_events.side_effect = [[event], []]
+    poll_admin_events(client=client_stub)
+    document.delete()
+
+    SyncCursor.objects.all().delete()  # as if the cursor had been reset or the window re-read
+    client_stub.get_admin_events.side_effect = [[event], []]
+    poll_admin_events(client=client_stub)
+
+    user.refresh_from_db()
+    assert user.is_anonymized is True

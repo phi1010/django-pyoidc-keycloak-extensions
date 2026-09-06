@@ -1,0 +1,9 @@
+{% extends "admin/change_form.html" %}
+{% load i18n %}
+
+{% block object-tools-items %}
+  {% if keycloak_sync_url %}
+    <li><a href="{{ keycloak_sync_url }}" class="historylink">{% translate "Sync now from Keycloak" %}</a></li>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}

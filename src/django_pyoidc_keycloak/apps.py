@@ -17,6 +17,35 @@ class KeycloakConfig(AppConfig):
         from django_pyoidc_keycloak import checks as keycloak_checks  # noqa: F401  (registers checks)
 
         self._disable_permission_creation()
+        self._request_offline_access()
+
+    def _request_offline_access(self) -> None:
+        """Add ``offline_access`` to the provider's requested scopes when asked to.
+
+        An offline token is the supported way to act on a user's behalf while they are away:
+        unlike a session refresh token it is not capped by SSO Session Max.  Off by default,
+        because it is a meaningfully longer-lived credential.
+
+        Safe to do here: django-pyoidc reads DJANGO_PYOIDC when it builds its (memoised)
+        OIDCSettings, which happens on the first OIDCClient -- after every app is ready.
+        """
+        if not app_settings.REQUEST_OFFLINE_ACCESS:
+            return
+
+        from django.conf import settings
+
+        providers = getattr(settings, "DJANGO_PYOIDC", None) or {}
+        op_name = app_settings.get("OP_NAME")
+        targets = [op_name] if op_name else list(providers)
+
+        for name in targets:
+            provider = providers.get(name)
+            if provider is None:
+                continue
+            key = "scopes" if "scopes" in provider else "SCOPES" if "SCOPES" in provider else "scopes"
+            scopes = list(provider.get(key) or ["openid"])
+            if "offline_access" not in scopes:
+                provider[key] = [*scopes, "offline_access"]
 
     def _disable_permission_creation(self) -> None:
         """Stop Django from populating ``auth_permission``.

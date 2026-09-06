@@ -110,6 +110,61 @@ def check_user_model(app_configs: Any, **kwargs: Any) -> list:
 
 
 @register()
+def check_offline_access(app_configs: Any, **kwargs: Any) -> list:
+    """An offline token is useless if the scope never made it into the request."""
+    if not app_settings.REQUEST_OFFLINE_ACCESS:
+        return []
+
+    providers = getattr(settings, "DJANGO_PYOIDC", None) or {}
+    op_name = app_settings.get("OP_NAME")
+    names = [op_name] if op_name else list(providers)
+
+    missing = [
+        name for name in names if name in providers and "offline_access" not in (providers[name].get("scopes") or [])
+    ]
+    if missing:
+        return [
+            Warning(
+                f"KEYCLOAK['REQUEST_OFFLINE_ACCESS'] is on but offline_access is not in the "
+                f"requested scopes for: {', '.join(missing)}.",
+                hint=(
+                    "The app adds it at start-up, so this usually means the provider was read "
+                    "before this app was ready. Add 'offline_access' to that provider's "
+                    "'scopes' list in DJANGO_PYOIDC explicitly."
+                ),
+                id="keycloak.W002",
+            )
+        ]
+    return []
+
+
+@register()
+def check_app_order(app_configs: Any, **kwargs: Any) -> list:
+    """Permission creation can only be disconnected if contrib.auth is ready first."""
+    installed = list(getattr(settings, "INSTALLED_APPS", []))
+    if app_settings.CREATE_DJANGO_PERMISSIONS:
+        return []
+    try:
+        auth_index = next(i for i, app in enumerate(installed) if app.startswith("django.contrib.auth"))
+        ours = next(i for i, app in enumerate(installed) if app.startswith("django_pyoidc_keycloak"))
+    except StopIteration:
+        return []
+    if ours < auth_index:
+        return [
+            Warning(
+                "django_pyoidc_keycloak is listed before django.contrib.auth in INSTALLED_APPS.",
+                hint=(
+                    "Permission creation is disconnected in this app's ready(), which only works "
+                    "if django.contrib.auth is ready first. Move it after django.contrib.auth, "
+                    "or auth_permission will be populated anyway."
+                ),
+                id="keycloak.W003",
+            )
+        ]
+    return []
+
+
+@register()
 def check_token_exchange(app_configs: Any, **kwargs: Any) -> list:
     """Keycloak refuses token exchange from a public client."""
     if not app_settings.TOKEN_EXCHANGE_ENABLED:

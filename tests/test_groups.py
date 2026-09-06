@@ -146,3 +146,18 @@ def test_unknown_group_paths_are_ignored_not_invented(user):
     apply_group_paths(user, ["/not-synced-yet"])
 
     assert user.memberships.count() == 0
+
+
+def test_a_membership_created_without_a_source_is_a_manual_override(client_stub, user):
+    """The admin inline creates rows directly, so the model default has to be the safe one.
+
+    Otherwise adding someone to a group on the user page would be silently revoked by the
+    next synchronisation.
+    """
+    group = KeycloakGroup.objects.create(name="staff", path="/staff")
+    user.memberships.create(group=group)
+    client_stub.get_user_groups.return_value = []
+
+    sync_user_groups(user, client=client_stub)
+
+    assert user.memberships.get().source == MembershipSource.MANUAL

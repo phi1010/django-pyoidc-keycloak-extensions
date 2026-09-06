@@ -168,7 +168,10 @@ class AbstractGroupMembership(models.Model):
         _("source"),
         max_length=16,
         choices=MembershipSource.choices,
-        default=MembershipSource.KEYCLOAK,
+        # Manual is the safe default: synchronisation always passes source= explicitly, so
+        # anything created another way (an admin inline, a shell) is an override that sync
+        # must not revoke.
+        default=MembershipSource.MANUAL,
     )
     expires_at = models.DateTimeField(
         _("expires at"),

@@ -352,3 +352,24 @@ def test_exchanged_tokens_are_never_cached():
 
     assert respx.calls.call_count == 2, "a cached exchange would have skipped the second call"
     assert cache.get("keycloak:exchange:reports") is None
+
+
+def test_offline_is_derived_from_the_granted_scope(user, session):
+    """Asking for offline_access does not mean Keycloak issued an offline token."""
+    token_set = store_tokens(
+        session=session,
+        user=user,
+        raw=RawTokens(access_token=JWT, refresh_token="r", scope="openid profile"),
+    )
+
+    assert token_set.is_offline is False
+
+
+def test_a_granted_offline_scope_marks_the_set_offline(user, session):
+    token_set = store_tokens(
+        session=session,
+        user=user,
+        raw=RawTokens(access_token=JWT, refresh_token="r", scope="openid offline_access"),
+    )
+
+    assert token_set.is_offline is True

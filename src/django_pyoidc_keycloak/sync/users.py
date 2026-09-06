@@ -63,10 +63,13 @@ def apply_representation(user: Any, representation: dict[str, Any], *, client=No
             user.is_active = enabled
             changed.append("is_active")
 
-    attributes = representation.get("attributes") or {}
-    if user.keycloak_attributes != attributes:
-        user.keycloak_attributes = attributes
-        changed.append("keycloak_attributes")
+    if "attributes" in representation:
+        # Only when Keycloak actually said something about them: the claims-built
+        # representation used at login has no "attributes" key, and absence is not emptiness.
+        attributes = representation.get("attributes") or {}
+        if user.keycloak_attributes != attributes:
+            user.keycloak_attributes = attributes
+            changed.append("keycloak_attributes")
 
     created = _to_datetime(representation.get("createdTimestamp"))
     if created and user.date_joined != created:

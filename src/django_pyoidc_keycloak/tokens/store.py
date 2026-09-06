@@ -45,7 +45,7 @@ def find_session(request: Any, user: Any = None):
     return queryset.order_by("-created_at").first()
 
 
-def store_tokens(*, session: Any, user: Any, raw: RawTokens, is_offline: bool = False) -> OIDCTokenSet | None:
+def store_tokens(*, session: Any, user: Any, raw: RawTokens, is_offline: bool | None = None) -> OIDCTokenSet | None:
     """Phase two: write the tokens into their encrypted columns."""
     if raw is None or raw.is_empty:
         return None
@@ -60,7 +60,10 @@ def store_tokens(*, session: Any, user: Any, raw: RawTokens, is_offline: bool = 
             "access_token_expires_at": raw.access_token_expires_at,
             "refresh_token_expires_at": raw.refresh_token_expires_at,
             "scope": raw.scope[:500],
-            "is_offline": is_offline or "offline_access" in (raw.scope or ""),
+            # Derived from the granted scope. Requesting offline_access does not mean
+            # Keycloak issued an offline token, and mislabelling one changes how its expiry
+            # is interpreted.
+            "is_offline": "offline_access" in (raw.scope or "") if is_offline is None else is_offline,
         },
     )
     return token_set

@@ -146,7 +146,7 @@ def user_login(request: Any, user: Any) -> None:
         logger.warning("No OIDCSession found for this login; tokens were not stored.")
         return
     try:
-        store_tokens(session=session, user=user, raw=raw, is_offline=bool(app_settings.REQUEST_OFFLINE_ACCESS))
+        store_tokens(session=session, user=user, raw=raw)
     except Exception as exc:
         logger.warning("Could not store tokens for %s: %s", user.pk, exc)
 

@@ -149,3 +149,16 @@ def test_token_storage_can_be_switched_off(settings):
     user = get_user(_Client(), tokens_for())
 
     assert not hasattr(user, PENDING_ATTR)
+
+
+def test_a_login_does_not_wipe_attributes_fetched_by_the_admin_api():
+    """Claims carry no `attributes` key; absence is not emptiness."""
+    from django_pyoidc_keycloak.sync.users import sync_user
+
+    stub = type("S", (), {"get_user_groups": lambda *a, **k: [], "get_user_realm_roles": lambda *a, **k: []})()
+    user = sync_user({"id": SUB, "username": "alice", "attributes": {"department": ["ops"]}}, client=stub)
+
+    get_user(_Client(), tokens_for())
+
+    user.refresh_from_db()
+    assert user.keycloak_attributes == {"department": ["ops"]}

@@ -31,6 +31,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/django_pyoidc_keycloak"]
+artifacts = ["src/django_pyoidc_keycloak/templates/**"]
 
 [tool.ruff]
 line-length = 120
@@ -44,7 +45,12 @@ select = ["E", "F", "I", "UP", "B", "DJ", "N"]
 DJANGO_SETTINGS_MODULE = "tests.testproject.settings"
 pythonpath = ["."]
 testpaths = ["tests"]
-filterwarnings = ["error::DeprecationWarning"]
+filterwarnings = [
+    "error::DeprecationWarning",
+    # pyoidc still calls datetime.utcnow(); upstream's problem, not ours.
+    "default::DeprecationWarning:oic.*",
+    "default::DeprecationWarning:.*oic\\.utils\\.time_util.*",
+]
 markers = ["integration: needs a real Keycloak container (Podman)"]
 # Integration tests are opt-in: run them with `pytest -m integration`.
 addopts = "-m 'not integration'"

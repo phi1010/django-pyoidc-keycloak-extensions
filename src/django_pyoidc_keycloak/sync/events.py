@@ -170,6 +170,9 @@ def _delete_local_user(keycloak_id: str, *, run) -> None:
         user = user_model.objects.get(keycloak_id=keycloak_id)
     except user_model.DoesNotExist:
         return
+    if user.is_anonymized:
+        # Already handled once; replaying the event must not now hard-delete the tombstone.
+        return
     outcome = handle_missing_user(user)
     if outcome == "deleted":
         run.deleted += 1
