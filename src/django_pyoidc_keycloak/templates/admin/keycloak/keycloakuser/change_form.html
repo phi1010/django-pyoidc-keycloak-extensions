@@ -3,7 +3,15 @@
 
 {% block object-tools-items %}
   {% if keycloak_sync_url %}
-    <li><a href="{{ keycloak_sync_url }}" class="historylink">{% translate "Sync now from Keycloak" %}</a></li>
+    {# A POST form rather than a link: this changes state, and Django does not CSRF-protect GET. #}
+    <li>
+      <form method="post" action="{{ keycloak_sync_url }}" style="display:inline">
+        {% csrf_token %}
+        <button type="submit" class="historylink" style="border:none;cursor:pointer">
+          {% translate "Sync now from Keycloak" %}
+        </button>
+      </form>
+    </li>
   {% endif %}
   {{ block.super }}
 {% endblock %}

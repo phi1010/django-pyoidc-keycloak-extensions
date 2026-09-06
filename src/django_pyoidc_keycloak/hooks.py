@@ -154,7 +154,7 @@ def user_login(request: Any, user: Any) -> None:
 def user_logout(user_request: Any, logout_request_args: Any = None) -> Any:
     """Purge stored tokens as the user logs out."""
     try:
-        session = find_session(user_request)
+        session = find_session(user_request, getattr(user_request, "user", None))
         if session is not None:
             purge_for_session(session)
     except Exception as exc:

@@ -16,12 +16,15 @@ from typing import Any
 
 from django.contrib import admin, messages
 from django.contrib.auth.models import Group as DjangoGroup
+from django.core.exceptions import PermissionDenied
 from django.http import HttpRequest, HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils import timezone
+from django.utils.decorators import method_decorator
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 from django.utils.translation import ngettext
+from django.views.decorators.http import require_POST
 
 from django_pyoidc_keycloak.admin_api.exceptions import KeycloakError, KeycloakUserNotFound
 from django_pyoidc_keycloak.conf import app_settings
@@ -154,8 +157,18 @@ class KeycloakUserAdmin(admin.ModelAdmin):
         ]
         return custom + urls
 
+    @method_decorator(require_POST)
     def sync_single_view(self, request: HttpRequest, object_id: str) -> Any:
-        """The 'Sync now' button on the change form."""
+        """The 'Sync now' button on the change form.
+
+        POST-only and permission-checked on purpose.  ``admin_site.admin_view`` only proves
+        the caller is staff, and this view changes state -- on a 404 from Keycloak it deletes
+        or anonymises the account.  As a GET link it would also have been reachable by CSRF,
+        since Django does not protect GET.
+        """
+        if not self.has_change_permission(request):
+            raise PermissionDenied
+
         user = self.get_object(request, object_id)
         if user is None:
             self.message_user(request, _("That user no longer exists."), messages.WARNING)

@@ -146,7 +146,7 @@ def sync_user(
 
     changed = apply_representation(user, representation, client=client)
     user.last_synced_at = timezone.now()
-    user.save()
+    _save_with_username_retry(user, representation)
 
     if sync_groups is None:
         sync_groups = bool(app_settings.SYNC_GROUPS)
@@ -160,6 +160,25 @@ def sync_user(
     else:
         user_synced.send(sender=user_model, user=user, representation=representation, changed_fields=changed)
     return user
+
+
+def _save_with_username_retry(user: Any, representation: dict[str, Any], attempts: int = 3) -> None:
+    """Save, re-deriving the username if another login claimed it in between.
+
+    The uniqueness check and the save are not one atomic step, so two concurrent logins can
+    both decide on the same name. Rather than 500 at login, take the loss and pick again.
+    """
+    derive = _username_strategy()
+    for attempt in range(attempts):
+        try:
+            with transaction.atomic():
+                user.save()
+        except IntegrityError:
+            if attempt + 1 == attempts:
+                raise
+            user.username = derive(representation, exclude_pk=user.pk)
+        else:
+            return
 
 
 def _create_savepoint():

@@ -35,19 +35,35 @@ def pop_tokens(user: Any) -> RawTokens | None:
 
 
 def find_session(request: Any, user: Any = None):
-    """Locate the OIDCSession django-pyoidc has just created for this login."""
+    """Locate the OIDCSession django-pyoidc has just created for this login.
+
+    Fails closed.  An earlier version fell back to "the most recent session row" when the
+    request carried no session key, which could attach one user's tokens to another user's
+    session -- and, because OIDCTokenSet is one-to-one on the session, silently overwrite
+    theirs.  Returning None instead costs nothing: the caller simply stores no tokens.
+    """
     from django_pyoidc.models import OIDCSession
 
     session_key = getattr(getattr(request, "session", None), "session_key", None)
-    queryset = OIDCSession.objects.all()
-    if session_key:
-        queryset = queryset.filter(cache_session_key=session_key)
+    if not session_key:
+        return None
+
+    queryset = OIDCSession.objects.filter(cache_session_key=session_key)
+
+    keycloak_id = getattr(user, "keycloak_id", None) if user is not None else None
+    if keycloak_id is not None:
+        # django-pyoidc stores the Keycloak "sub" here, which is our keycloak_id.
+        queryset = queryset.filter(sub=str(keycloak_id))
+
     return queryset.order_by("-created_at").first()
 
 
 def store_tokens(*, session: Any, user: Any, raw: RawTokens, is_offline: bool | None = None) -> OIDCTokenSet | None:
     """Phase two: write the tokens into their encrypted columns."""
     if raw is None or raw.is_empty:
+        return None
+
+    if session is None:
         return None
 
     token_set, _created = OIDCTokenSet.objects.update_or_create(

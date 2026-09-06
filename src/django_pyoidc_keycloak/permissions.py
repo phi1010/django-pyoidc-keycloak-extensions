@@ -80,7 +80,11 @@ class KeycloakAuthorizationMixin(models.Model):
         abstract = True
 
     def has_perm(self, perm: str, obj: Any = None) -> bool:
-        if self.is_active and self.is_superuser:
+        if not self.is_active:
+            # Matches ModelBackend, and means a user disabled in Keycloak loses access as soon
+            # as sync flips is_active, without waiting for the policy backend to notice.
+            return False
+        if self.is_superuser:
             return True
         return _delegate(self, "has_perm", perm, obj)
 
@@ -91,12 +95,16 @@ class KeycloakAuthorizationMixin(models.Model):
         return all(self.has_perm(perm, obj) for perm in perm_list)
 
     def has_module_perms(self, app_label: str) -> bool:
-        if self.is_active and self.is_superuser:
+        if not self.is_active:
+            return False
+        if self.is_superuser:
             return True
         return _delegate(self, "has_module_perms", app_label)
 
     def get_all_permissions(self, obj: Any = None) -> set[str]:
         """Union of what the backends report. Nothing is read from the database."""
+        if not self.is_active:
+            return set()
         permissions: set[str] = set()
         for backend in auth.get_backends():
             getter = getattr(backend, "get_all_permissions", None)

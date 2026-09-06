@@ -12,6 +12,7 @@ from django.core.cache import cache
 from django_pyoidc_keycloak.admin_api.client import KeycloakAdminClient
 from django_pyoidc_keycloak.admin_api.exceptions import (
     KeycloakAuthenticationError,
+    KeycloakNotFound,
     KeycloakPermissionError,
     KeycloakUserNotFound,
 )
@@ -101,12 +102,38 @@ def test_pickling_drops_the_token(client):
 
 
 @respx.mock
-def test_a_404_means_the_user_is_gone(client):
+def test_a_404_on_a_user_means_that_user_is_gone(client):
     mock_token(respx)
-    respx.get(f"{ADMIN_BASE}/users/missing").mock(return_value=httpx.Response(404))
+    user_id = "11111111-1111-1111-1111-111111111111"
+    respx.get(f"{ADMIN_BASE}/users/{user_id}").mock(return_value=httpx.Response(404))
 
     with pytest.raises(KeycloakUserNotFound):
-        client.get_user("missing")
+        client.get_user(user_id)
+
+
+@respx.mock
+def test_a_404_elsewhere_is_not_a_missing_user(client):
+    """A mistyped path or a gateway 404 must never reach the deletion path."""
+    mock_token(respx)
+    respx.get(f"{ADMIN_BASE}/groups/abc/children").mock(return_value=httpx.Response(404))
+
+    with pytest.raises(KeycloakNotFound):
+        client.request("GET", "/groups/abc/children")
+
+    # It is not the subclass that drives deletion.
+    try:
+        client.request("GET", "/groups/abc/children")
+    except KeycloakNotFound as exc:
+        assert not isinstance(exc, KeycloakUserNotFound)
+
+
+@respx.mock
+def test_a_404_on_a_non_uuid_user_path_is_not_a_missing_user(client):
+    mock_token(respx)
+    respx.get(f"{ADMIN_BASE}/users/count").mock(return_value=httpx.Response(404))
+
+    with pytest.raises(KeycloakNotFound):
+        client.count_users()
 
 
 @respx.mock

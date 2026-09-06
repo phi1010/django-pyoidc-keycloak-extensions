@@ -168,6 +168,27 @@ which is exempt from SSO Session Max.
 | `ADMIN_BULK_INLINE_LIMIT` | `50` | Cap on synchronising inline from the admin without Celery. |
 | `EVENT_OVERLAP_SECONDS` | `300` | How far back each event poll re-reads. |
 
+## Security notes
+
+**The Django cache must be trusted storage.** django-pyoidc stores its pyoidc state in the
+cache and reads it back with `jsonpickle.decode` (upstream marks this `noqa: S301`), so
+anyone who can write to that cache can execute code in your process on the next decode. Do
+not point `CACHES["default"]` at a Redis or memcached instance shared with less-trusted
+components, and keep it authenticated and network-isolated.
+
+**Group mappers must derive from actual group membership.** At login, membership is read from
+the `groups` claim when present. This library only ever grants membership in groups Keycloak
+owns — a locally created group can never be reached through a claim — but if you configure
+the mapper over a user-editable attribute, a user controls their own claim content.
+
+**Token encryption uses PBKDF2-SHA256 at 100 000 iterations**, which is what
+`django-fernet-encrypted-fields` does and is below OWASP's current 600k guidance. Session
+tokens are short-lived, so this is minor; weigh it if you enable `REQUEST_OFFLINE_ACCESS`,
+since offline tokens live much longer.
+
+**`django-pyoidc` has no upper version bound.** It holds the actual OIDC request paths, so
+pin it in your own project and read its release notes before upgrading.
+
 ## Notes on behaviour worth knowing
 
 * **Local-only users are never touched.** A user with `keycloak_id = NULL` (your bootstrap
@@ -176,6 +197,9 @@ which is exempt from SSO Session Max.
   is never re-imported as a fresh user.
 * **Service-account users are not imported.** Keycloak excludes them from `GET /users`, so
   reconciliation never sees them; one is only created if it actually logs in.
+* **Inactive users have no permissions.** `has_perm` returns `False` for `is_active=False`
+  before any backend is consulted, so disabling an account in Keycloak revokes access as soon
+  as sync notices, without waiting for your policy engine.
 * **Two empty tables remain.** `django.contrib.auth` cannot be removed from `INSTALLED_APPS`,
   so `auth_permission` and `auth_group` exist. This library never reads or writes them, and
   permission creation is disconnected so they stay empty.

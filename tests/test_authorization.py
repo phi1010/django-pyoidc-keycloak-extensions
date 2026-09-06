@@ -34,12 +34,23 @@ def test_superuser_short_circuits_without_asking_the_backend(user):
     assert StubPolicyBackend.calls == []
 
 
-def test_an_inactive_superuser_gets_no_shortcut(user):
+def test_an_inactive_user_is_denied_without_asking_the_backend(user):
+    """Matches ModelBackend: disabling in Keycloak revokes access immediately, whatever the
+    policy backend would have said."""
+    StubPolicyBackend.policy = {"shop.view_order": {"alice"}}
+    user.is_active = False
+
+    assert user.has_perm("shop.view_order") is False
+    assert user.has_module_perms("shop") is False
+    assert user.get_all_permissions() == set()
+    assert StubPolicyBackend.calls == []
+
+
+def test_an_inactive_superuser_is_denied_too(user):
     user.is_superuser = True
     user.is_active = False
 
     assert user.has_perm("anything.at_all") is False
-    assert StubPolicyBackend.calls  # it had to ask
 
 
 def test_has_module_perms_delegates(user):

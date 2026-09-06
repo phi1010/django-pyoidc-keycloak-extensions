@@ -7,6 +7,7 @@ from django.contrib import admin
 from django.contrib.auth.models import Group as DjangoGroup
 from django.test import RequestFactory
 
+from django_pyoidc_keycloak.admin import KeycloakUserAdmin
 from django_pyoidc_keycloak.checks import (
     check_authentication_backends,
     check_encryption_key,
@@ -218,7 +219,31 @@ def test_the_admin_index_has_no_native_groups(admin_browser):
 def test_sync_now_reports_that_a_local_account_has_nothing_to_sync(admin_browser):
     local = KeycloakUser.objects.create_user(username="local-only")
 
-    response = admin_browser.get(f"/admin/keycloak/keycloakuser/{local.pk}/sync/", follow=True)
+    response = admin_browser.post(f"/admin/keycloak/keycloakuser/{local.pk}/sync/", follow=True)
 
     assert response.status_code == 200
     assert b"local-only account" in response.content
+
+
+def test_sync_now_refuses_a_get(admin_browser):
+    """It changes state -- on a Keycloak 404 it deletes or anonymises the account -- and
+    Django does not CSRF-protect GET, so an <img src=...> would have been enough."""
+    user = KeycloakUser.objects.create_user(username="alice")
+
+    response = admin_browser.get(f"/admin/keycloak/keycloakuser/{user.pk}/sync/")
+
+    assert response.status_code == 405
+
+
+def test_sync_now_requires_change_permission(client):
+    """Staff alone is not enough: admin_view only proves the caller can open the admin."""
+    from unittest import mock
+
+    staff = KeycloakUser.objects.create_user(username="readonly-staff", password="pw", is_staff=True)
+    client.force_login(staff)
+    user = KeycloakUser.objects.create_user(username="alice")
+
+    with mock.patch.object(KeycloakUserAdmin, "has_change_permission", return_value=False):
+        response = client.post(f"/admin/keycloak/keycloakuser/{user.pk}/sync/")
+
+    assert response.status_code == 403

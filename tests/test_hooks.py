@@ -79,7 +79,7 @@ def test_a_username_collision_at_login_is_resolved():
 
 
 def test_group_membership_comes_from_the_claim_without_an_api_call():
-    KeycloakGroup.objects.create(name="staff", path="/staff")
+    KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
 
     user = get_user(_Client(), tokens_for(groups=["/staff"]))
 
@@ -162,3 +162,12 @@ def test_a_login_does_not_wipe_attributes_fetched_by_the_admin_api():
 
     user.refresh_from_db()
     assert user.keycloak_attributes == {"department": ["ops"]}
+
+
+def test_a_groups_claim_cannot_reach_a_local_only_group():
+    """Otherwise a mapper over a user-editable attribute would be an escalation path."""
+    KeycloakGroup.objects.create(name="admins", path="/admins")
+
+    user = get_user(_Client(), tokens_for(groups=["/admins"]))
+
+    assert user.memberships.count() == 0

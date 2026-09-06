@@ -117,7 +117,10 @@ def apply_group_paths(user: Any, paths: list[str]) -> dict[str, int]:
     group_model = get_group_model()
     membership_model = get_membership_model()
 
-    wanted = set(group_model.objects.filter(path__in=paths).values_list("pk", flat=True))
+    # Managed groups only. A locally created group (keycloak_id IS NULL) may share a path
+    # with something Keycloak reports -- or with something a user can influence through a
+    # misconfigured group mapper -- and Keycloak never authorised membership in it.
+    wanted = set(group_model.objects.filter(path__in=paths, keycloak_id__isnull=False).values_list("pk", flat=True))
     current = set(
         membership_model.objects.filter(user=user, source=MembershipSource.KEYCLOAK).values_list("group_id", flat=True)
     )
@@ -156,7 +159,9 @@ def apply_group_paths(user: Any, paths: list[str]) -> dict[str, int]:
         )
     removable.delete()
 
-    missing = set(paths) - set(group_model.objects.filter(path__in=paths).values_list("path", flat=True))
+    missing = set(paths) - set(
+        group_model.objects.filter(path__in=paths, keycloak_id__isnull=False).values_list("path", flat=True)
+    )
     if missing:
         logger.info("Keycloak reported groups that do not exist locally yet: %s", sorted(missing))
 

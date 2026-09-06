@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from collections.abc import Iterator
@@ -23,6 +24,7 @@ import httpx
 from django_pyoidc_keycloak.admin_api.exceptions import (
     KeycloakAPIError,
     KeycloakAuthenticationError,
+    KeycloakNotFound,
     KeycloakPermissionError,
     KeycloakUserNotFound,
 )
@@ -34,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 #: Refresh the service-account token this many seconds before it actually expires.
 TOKEN_EXPIRY_LEEWAY = 30
+
+#: Exactly ``/users/<uuid>`` -- the only path whose 404 means "this user was deleted".
+_USER_RESOURCE = re.compile(r"/users/[0-9a-fA-F-]{36}")
 
 
 class KeycloakAdminClient:
@@ -158,8 +163,12 @@ class KeycloakAdminClient:
                 )
                 raise KeycloakPermissionError(msg)
             if response.status_code == 404:
+                # Only a 404 on a specific user means that user is gone. Every other 404 is a
+                # configuration or gateway problem, and must not reach the deletion path.
                 msg = f"Not found in Keycloak: {path}"
-                raise KeycloakUserNotFound(msg)
+                if _USER_RESOURCE.fullmatch(path):
+                    raise KeycloakUserNotFound(msg)
+                raise KeycloakNotFound(msg)
             if response.status_code == 429 or response.status_code >= 500:
                 last_error = KeycloakAPIError(
                     f"Keycloak returned {response.status_code} for {method} {path}",
@@ -225,7 +234,7 @@ class KeycloakAdminClient:
         """Direct children of a group. Empty on Keycloak versions without the endpoint."""
         try:
             return list(self.get_json(f"/groups/{group_id}/children", params={"briefRepresentation": False}))
-        except KeycloakUserNotFound:
+        except KeycloakNotFound:
             # Older servers have no /children endpoint; they inline subGroups instead.
             return []
 

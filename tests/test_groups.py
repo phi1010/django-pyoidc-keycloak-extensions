@@ -77,7 +77,7 @@ def test_locally_created_groups_are_never_pruned(client_stub):
 
 
 def test_membership_follows_keycloak(client_stub, user):
-    KeycloakGroup.objects.create(name="staff", path="/staff")
+    KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
     client_stub.get_user_groups.return_value = [{"path": "/staff"}]
 
     sync_user_groups(user, client=client_stub)
@@ -86,7 +86,7 @@ def test_membership_follows_keycloak(client_stub, user):
 
 
 def test_membership_removed_in_keycloak_is_removed_locally(client_stub, user):
-    group = KeycloakGroup.objects.create(name="staff", path="/staff")
+    group = KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
     GroupMembership.objects.create(user=user, group=group, source=MembershipSource.KEYCLOAK)
     client_stub.get_user_groups.return_value = []
 
@@ -97,7 +97,7 @@ def test_membership_removed_in_keycloak_is_removed_locally(client_stub, user):
 
 def test_a_manual_override_survives_synchronisation(client_stub, user):
     """The whole point of the source field: an admin grant is not Keycloak's to revoke."""
-    group = KeycloakGroup.objects.create(name="staff", path="/staff")
+    group = KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
     GroupMembership.objects.create(user=user, group=group, source=MembershipSource.MANUAL)
     client_stub.get_user_groups.return_value = []
 
@@ -107,7 +107,7 @@ def test_a_manual_override_survives_synchronisation(client_stub, user):
 
 
 def test_expired_overrides_are_swept(user):
-    group = KeycloakGroup.objects.create(name="temp", path="/temp")
+    group = KeycloakGroup.objects.create(name="temp", path="/temp", keycloak_id=uuid.uuid4())
     GroupMembership.objects.create(
         user=user,
         group=group,
@@ -120,7 +120,7 @@ def test_expired_overrides_are_swept(user):
 
 
 def test_keycloak_memberships_are_not_swept_by_expiry(user):
-    group = KeycloakGroup.objects.create(name="staff", path="/staff")
+    group = KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
     GroupMembership.objects.create(
         user=user,
         group=group,
@@ -132,7 +132,7 @@ def test_keycloak_memberships_are_not_swept_by_expiry(user):
 
 
 def test_membership_changes_are_announced(user):
-    KeycloakGroup.objects.create(name="staff", path="/staff")
+    KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
     seen = []
     membership_changed.connect(lambda **kw: seen.append(kw["action"]), weak=False)
 
@@ -154,10 +154,19 @@ def test_a_membership_created_without_a_source_is_a_manual_override(client_stub,
     Otherwise adding someone to a group on the user page would be silently revoked by the
     next synchronisation.
     """
-    group = KeycloakGroup.objects.create(name="staff", path="/staff")
+    group = KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
     user.memberships.create(group=group)
     client_stub.get_user_groups.return_value = []
 
     sync_user_groups(user, client=client_stub)
 
     assert user.memberships.get().source == MembershipSource.MANUAL
+
+
+def test_a_claim_cannot_grant_membership_in_a_local_only_group(user):
+    """A path collision with a manually created group must not become an escalation path."""
+    KeycloakGroup.objects.create(name="admins", path="/admins")  # local-only: no keycloak_id
+
+    apply_group_paths(user, ["/admins"])
+
+    assert user.memberships.count() == 0

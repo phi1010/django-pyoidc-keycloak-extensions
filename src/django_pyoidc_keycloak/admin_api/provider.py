@@ -40,6 +40,16 @@ class KeycloakConnection:
     def __repr__(self) -> str:  # never render the secret
         return f"KeycloakConnection(server_url={self.server_url!r}, realm={self.realm!r}, client_id={self.client_id!r})"
 
+    def __getstate__(self) -> dict[str, object]:
+        """Drop the secret when pickled, so it cannot ride along into a cache or a traceback."""
+        state = self.__dict__.copy()
+        state["client_secret"] = ""
+        return state
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        # frozen=True blocks normal attribute assignment.
+        object.__setattr__(self, "__dict__", state)
+
 
 def _resolve_op_name() -> str:
     configured = app_settings.get("OP_NAME")

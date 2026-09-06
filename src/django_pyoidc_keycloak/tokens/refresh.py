@@ -73,7 +73,14 @@ def _perform_refresh(token_set: Any) -> Any:
         raise TokensUnavailable(msg)
 
     payload = response.json()
-    token_set.access_token = payload.get("access_token")
+    access_token = payload.get("access_token")
+    if not access_token:
+        # Never persist a null token: get_valid_access_token is typed to return a str, and a
+        # caller would carry the None into an Authorization header.
+        msg = "Keycloak returned no access_token for the refresh grant."
+        raise TokensUnavailable(msg)
+
+    token_set.access_token = access_token
     token_set.access_token_expires_at = _expiry(payload.get("expires_in"))
     if payload.get("refresh_token"):
         # Keycloak rotates the refresh token when "Revoke Refresh Token" is enabled.

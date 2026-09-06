@@ -19,8 +19,16 @@ class KeycloakPermissionError(KeycloakError):
     """The service account lacks a required realm-management role."""
 
 
-class KeycloakUserNotFound(KeycloakError):  # noqa: N818 - reads better than ...NotFoundError
-    """A user no longer exists in Keycloak. This is what drives deletion."""
+class KeycloakNotFound(KeycloakError):  # noqa: N818 - reads better than KeycloakNotFoundError
+    """Keycloak returned 404 for some path.
+
+    Deliberately distinct from :class:`KeycloakUserNotFound`: a 404 from a mistyped path, an
+    unsupported endpoint or a gateway must never be read as "delete this user".
+    """
+
+
+class KeycloakUserNotFound(KeycloakNotFound):  # noqa: N818 - reads better than ...NotFoundError
+    """A specific user no longer exists in Keycloak. This is what drives deletion."""
 
 
 class KeycloakAPIError(KeycloakError):

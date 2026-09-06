@@ -8,11 +8,15 @@ be resolved rather than assumed away.
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any
 
 from django.contrib.auth import get_user_model
 
 MAX_LENGTH = 150
+
+#: How many ``-2``, ``-3``, ... candidates to try before falling back to a unique suffix.
+MAX_SUFFIX = 50
 
 #: Django's default username validator allows letters, digits and @ . + - _
 _INVALID = re.compile(r"[^\w.@+-]", re.UNICODE)
@@ -57,10 +61,15 @@ def derive_username(representation: dict[str, Any], *, exclude_pk: Any = None) -
         return base
 
     # Reserve room for the suffix rather than truncating it away.
-    suffix = 2
-    while True:
+    for suffix in range(2, MAX_SUFFIX + 1):
         tail = f"-{suffix}"
         candidate = f"{base[: MAX_LENGTH - len(tail)]}{tail}"
         if not queryset.filter(username=candidate).exists():
             return candidate
-        suffix += 1
+
+    # Bounded fallback, so a large collision set cannot turn this into a long scan.
+    # The Keycloak id is unique by construction, which also breaks ties between two
+    # concurrent logins racing for the same name.
+    unique = uuid.uuid4().hex[:12] if not representation.get("id") else str(representation["id"])[:12]
+    tail = f"-{unique}"
+    return f"{base[: MAX_LENGTH - len(tail)]}{tail}"
