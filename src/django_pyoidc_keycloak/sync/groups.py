@@ -12,7 +12,6 @@ import uuid
 from typing import Any
 
 from django.apps import apps
-from django.db.models.base import ModelBase
 from django.utils import timezone
 
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
