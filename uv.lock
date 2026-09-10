@@ -470,6 +470,7 @@ dependencies = [
     { name = "django-fernet-encrypted-fields" },
     { name = "django-pyoidc" },
     { name = "httpx" },
+    { name = "urllib3" },
 ]
 
 [package.optional-dependencies]
@@ -502,6 +503,7 @@ requires-dist = [
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "testcontainers", marker = "extra == 'dev'", specifier = ">=4.8" },
+    { name = "urllib3", specifier = ">=2" },
 ]
 provides-extras = ["celery", "dev"]
 

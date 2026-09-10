@@ -202,3 +202,84 @@ def test_the_connection_comes_from_django_pyoidc_settings():
 
 def test_the_connection_repr_hides_the_secret():
     assert "s3cr3t" not in repr(get_connection())
+
+
+# -- URL construction ---------------------------------------------------
+# The bearer token is a credential for the whole realm directory, so a path must never be
+# able to name another host, and must never climb out of /admin/realms/<realm>.
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "https://evil.example.org/steal",
+        "http://evil.example.org/steal",
+        # A protocol-relative URL, and a scheme the old startswith("http") never saw.
+        "//evil.example.org/steal",
+        "gopher://evil.example.org/steal",
+    ],
+)
+def test_an_absolute_url_is_refused(client, path):
+    with pytest.raises(ValueError, match="absolute Admin API URL"):
+        client._url_for(path)
+
+
+def test_a_scheme_inside_the_query_string_is_not_an_absolute_url(client):
+    """Only the path decides; a URL-valued parameter is a legitimate thing to send."""
+    path = "/users?redirect=https://app.example.org"
+
+    assert client._url_for(path) == f"{ADMIN_BASE}{path}"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # Each of these resolves outside /admin/realms/demo -- the middle two into another
+        # realm, which the service-account token would happily authenticate against.
+        "/../master",
+        "/users/../../../../admin/realms/master/users",
+        "/users/../../realms/master/users",
+        "/../../../etc",
+    ],
+)
+def test_a_path_that_climbs_out_of_the_realm_is_refused(client, path):
+    with pytest.raises(ValueError, match="climbs out of the realm"):
+        client._url_for(path)
+
+
+@pytest.mark.parametrize("path", ["/users/../groups", "/groups/..//users"])
+def test_a_dot_segment_that_stays_inside_the_realm_is_resolved_not_refused(client, path):
+    """The rule is about where the request lands, not about the spelling of the path."""
+    assert client._url_for(path).startswith(f"{ADMIN_BASE}/")
+
+
+def test_a_path_beginning_with_http_but_not_a_url_is_allowed(client):
+    """`startswith("http")` also matched paths like this one, sending them off unprefixed."""
+    assert client._url_for("/httpbin-probe") == f"{ADMIN_BASE}/httpbin-probe"
+
+
+@pytest.mark.parametrize(
+    ("base_suffix", "path"),
+    [("", "/users"), ("", "users"), ("/", "/users"), ("/", "users")],
+)
+def test_exactly_one_slash_joins_the_two_halves(connection, base_suffix, path, monkeypatch):
+    monkeypatch.setattr(
+        type(connection), "admin_base", property(lambda self: f"{ADMIN_BASE}{base_suffix}"), raising=True
+    )
+
+    assert KeycloakAdminClient(connection)._url_for(path) == f"{ADMIN_BASE}/users"
+
+
+def test_a_query_string_survives_the_join(client):
+    assert client._url_for("users?briefRepresentation=false") == f"{ADMIN_BASE}/users?briefRepresentation=false"
+
+
+@respx.mock
+def test_a_user_404_is_recognised_without_a_leading_slash(client):
+    """Normalising the path keeps the deletion path keyed on the resource, not on spelling."""
+    user_id = "11111111-1111-1111-1111-111111111111"
+    mock_token(respx)
+    respx.get(f"{ADMIN_BASE}/users/{user_id}").mock(return_value=httpx.Response(404))
+
+    with pytest.raises(KeycloakUserNotFound):
+        client.request("GET", f"users/{user_id}")

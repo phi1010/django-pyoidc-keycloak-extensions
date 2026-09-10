@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import httpx
+from urllib3.util import parse_url
 
 from django_pyoidc_keycloak.admin_api.exceptions import (
     KeycloakAPIError,
@@ -134,11 +135,46 @@ class KeycloakAdminClient:
 
     # -- requests -------------------------------------------------------
 
+    def _url_for(self, path: str) -> str:
+        """Join a realm-relative Admin API path onto this realm's admin base.
+
+        Every request carries the service-account bearer token, which is a credential for the
+        whole realm's user directory, so the resulting URL must be proven to stay inside
+        ``/admin/realms/<realm>``.  Paths are built by interpolating ids that arrive from
+        Keycloak responses and from the local database, so this is not merely a matter of
+        caller discipline.
+
+        The check is made on the *parsed and normalised* URL rather than on the path string:
+        ``..`` segments are resolved during parsing, and it is the resolved form that decides
+        where the request actually goes.  ``/users/../../../master`` reads as a path under
+        ``/users``, but resolves to ``/admin/master`` -- a different realm.
+        """
+        # Only the path portion decides this: a URL-valued query parameter is legitimate.
+        probe = path.split("?", 1)[0].split("#", 1)[0]
+        if "://" in probe or probe.startswith("//"):
+            msg = f"Refusing an absolute Admin API URL: {path!r}. Pass a path relative to the realm."
+            raise ValueError(msg)
+
+        # Exactly one separator, whatever the two halves bring with them. The leading slash
+        # matters before parsing: without it, parse_url reads "users/count" as a *host*.
+        base = parse_url(self.connection.admin_base.rstrip("/"))
+        url = parse_url(f"{base}/{path.lstrip('/')}")
+
+        if (url.scheme, url.host, url.port) != (base.scheme, base.host, base.port):
+            msg = f"Refusing an Admin API path that redirects the request to another host: {path!r}."
+            raise ValueError(msg)
+        base_path = base.path or "/"
+        if url.path != base_path and not (url.path or "/").startswith(f"{base_path}/"):
+            msg = f"Refusing an Admin API path that climbs out of the realm: {path!r} resolves to {url.path!r}."
+            raise ValueError(msg)
+        return str(url)
+
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Perform an Admin API request, retrying transient failures."""
-        # TODO do not allow requests to other paths. A path might start with http without it being http(s)://.
-        # TODO strip the trainling slash from admin base and the leading one from path, and then add exactly one inbetween.
-        url = path if path.startswith("http") else f"{self.connection.admin_base}{path}"
+        url = self._url_for(path)
+        # Compare and report on the normalised form, so a path that only differs in its
+        # leading slash still counts as the user resource below.
+        path = f"/{path.lstrip('/')}"
         attempts = max(1, int(app_settings.MAX_RETRIES))
         last_error: Exception | None = None
 

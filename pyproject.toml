@@ -28,6 +28,9 @@ dependencies = [
     "django-pyoidc>=1.0.13",
     "httpx>=0.27",
     "django-fernet-encrypted-fields>=0.4.0",
+    # Used to parse and normalise Admin API URLs before they are requested; httpx brings
+    # httpcore rather than urllib3, so it is declared here in its own right.
+    "urllib3>=2",
 ]
 
 [project.optional-dependencies]
