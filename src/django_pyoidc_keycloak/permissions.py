@@ -36,6 +36,7 @@ class AuthorizationBackendProtocol(Protocol):
 
     def has_module_perms(self, user_obj: Any, app_label: str) -> bool: ...
 
+    # TODO explain why this is not provided by the sessionmiddleware.
     def get_user(self, user_id: Any) -> Any: ...
 
 

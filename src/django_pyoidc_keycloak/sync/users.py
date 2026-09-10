@@ -15,6 +15,7 @@ from django.utils.module_loading import import_string
 
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
 from django_pyoidc_keycloak.conf import app_settings
+from django_pyoidc_keycloak.models import KeycloakUser
 from django_pyoidc_keycloak.signals import user_anonymized, user_created, user_deleted, user_synced
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,7 @@ def sync_user(
         raise ValueError(msg)
     kc_id = uuid.UUID(str(kc_id))
 
-    user_model = get_user_model()
+    user_model: type[KeycloakUser] = get_user_model()
     created_now = False
     try:
         user = user_model.objects.get(keycloak_id=kc_id)
@@ -227,7 +228,7 @@ def delete_or_anonymize(user: Any) -> str:
             user.delete()
         except ProtectedError, RestrictedError, IntegrityError:
             # Something references this user with PROTECT/RESTRICT, or a database-level
-            # foreign key rejected the delete. Keep the row, drop the personal data.
+            # foreign key rejected the deletion. Keep the row, drop the personal data.
             transaction.savepoint_rollback(savepoint)
             user.refresh_from_db()
             anonymize(user)

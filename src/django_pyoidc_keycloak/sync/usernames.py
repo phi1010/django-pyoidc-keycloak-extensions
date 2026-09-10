@@ -16,7 +16,7 @@ from django.contrib.auth import get_user_model
 MAX_LENGTH = 150
 
 #: How many ``-2``, ``-3``, ... candidates to try before falling back to a unique suffix.
-MAX_SUFFIX = 50
+MAX_SUFFIX = 99
 
 #: Django's default username validator allows letters, digits and @ . + - _
 _INVALID = re.compile(r"[^\w.@+-]", re.UNICODE)

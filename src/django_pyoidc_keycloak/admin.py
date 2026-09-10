@@ -216,10 +216,12 @@ class KeycloakUserAdmin(admin.ModelAdmin):
 
     @admin.action(description=_("Synchronise selected users from Keycloak"))
     def action_sync_selected(self, request: HttpRequest, queryset: Any) -> None:
+        # TODO does this check permissions?
         self._run_sync(request, queryset)
 
     @admin.action(description=_("Synchronise ALL users from Keycloak"))
     def action_sync_all(self, request: HttpRequest, queryset: Any) -> None:
+        # TODO does this check permissions?
         self._run_sync(request, self.model.objects.filter(keycloak_id__isnull=False), all_users=True)
 
     def _run_sync(self, request: HttpRequest, queryset: Any, *, all_users: bool = False) -> None:

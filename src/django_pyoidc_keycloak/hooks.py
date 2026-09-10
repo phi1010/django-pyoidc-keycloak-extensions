@@ -20,6 +20,7 @@ from django.core.exceptions import SuspiciousOperation
 from django.utils import timezone
 
 from django_pyoidc_keycloak.conf import app_settings
+from django_pyoidc_keycloak.models import KeycloakUser
 from django_pyoidc_keycloak.signals import user_created
 from django_pyoidc_keycloak.tokens.extract import extract_raw_tokens
 from django_pyoidc_keycloak.tokens.store import find_session, pop_tokens, purge_for_session, stash_tokens, store_tokens
@@ -86,7 +87,7 @@ def get_user(client: Any, tokens: dict[str, Any]) -> Any:
         msg = "The OIDC tokens carry no 'sub' claim, so the user cannot be identified."
         raise SuspiciousOperation(msg)
 
-    user_model = get_user_model()
+    user_model : type[KeycloakUser] = get_user_model()
     keycloak_id = uuid.UUID(str(sub))
 
     try:

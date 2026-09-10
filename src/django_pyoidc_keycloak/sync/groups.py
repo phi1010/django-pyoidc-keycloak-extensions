@@ -12,21 +12,25 @@ import uuid
 from typing import Any
 
 from django.apps import apps
+from django.db.models.base import ModelBase
 from django.utils import timezone
 
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
 from django_pyoidc_keycloak.conf import app_settings
+from django_pyoidc_keycloak.models import GroupMembership, KeycloakGroup
 from django_pyoidc_keycloak.models.base import MembershipSource
 from django_pyoidc_keycloak.signals import group_synced, membership_changed
 
 logger = logging.getLogger(__name__)
 
 
-def get_group_model():
+def get_group_model() -> type[KeycloakGroup]:
+    # TODO add django check that ensures that this typing constraint holds with the settings configured.
     return apps.get_model(app_settings.group_model)
 
 
-def get_membership_model():
+def get_membership_model() -> type[GroupMembership]:
+    # TODO add django check that ensures that this typing constraint holds with the settings configured.
     return apps.get_model(app_settings.membership_model)
 
 
@@ -105,6 +109,7 @@ def sync_user_groups(user: Any, *, client=None) -> dict[str, int]:
         logger.warning("Could not read groups for %s: %s", user.keycloak_id, exc)
         return {"added": 0, "removed": 0}
 
+    # TODO type check or conversion!
     return apply_group_paths(user, [entry.get("path") for entry in remote if entry.get("path")])
 
 

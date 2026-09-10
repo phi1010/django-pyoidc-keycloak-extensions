@@ -42,6 +42,7 @@ def find_session(request: Any, user: Any = None):
     session -- and, because OIDCTokenSet is one-to-one on the session, silently overwrite
     theirs.  Returning None instead costs nothing: the caller simply stores no tokens.
     """
+    # TODO import this at the top of the file.
     from django_pyoidc.models import OIDCSession
 
     session_key = getattr(getattr(request, "session", None), "session_key", None)

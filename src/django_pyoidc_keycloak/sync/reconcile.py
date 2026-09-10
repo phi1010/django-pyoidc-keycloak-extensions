@@ -14,6 +14,7 @@ from django.contrib.auth import get_user_model
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
 from django_pyoidc_keycloak.admin_api.exceptions import KeycloakUserNotFound
 from django_pyoidc_keycloak.conf import app_settings
+from django_pyoidc_keycloak.models import KeycloakUser
 from django_pyoidc_keycloak.models.sync import SyncKind
 from django_pyoidc_keycloak.sync.groups import sweep_expired_memberships, sync_groups
 from django_pyoidc_keycloak.sync.runs import record_error, sync_run
@@ -79,7 +80,7 @@ def full_reconcile(*, client=None, import_all: bool | None = None, dry_run: bool
 
 def _remove_vanished_users(client, seen_ids: set[str], *, run, dry_run: bool) -> dict[str, int]:
     """Confirm and remove local users that the realm listing did not mention."""
-    user_model = get_user_model()
+    user_model : type[KeycloakUser] = get_user_model()
     counts = {"deleted": 0, "anonymized": 0}
 
     candidates = user_model.objects.filter(keycloak_id__isnull=False, is_anonymized=False).exclude(

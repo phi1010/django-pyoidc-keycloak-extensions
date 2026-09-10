@@ -136,6 +136,8 @@ class KeycloakAdminClient:
 
     def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """Perform an Admin API request, retrying transient failures."""
+        # TODO do not allow requests to other paths. A path might start with http without it being http(s)://.
+        # TODO strip the trainling slash from admin base and the leading one from path, and then add exactly one inbetween.
         url = path if path.startswith("http") else f"{self.connection.admin_base}{path}"
         attempts = max(1, int(app_settings.MAX_RETRIES))
         last_error: Exception | None = None

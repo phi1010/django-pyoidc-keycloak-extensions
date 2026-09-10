@@ -27,6 +27,7 @@ from django.utils import timezone
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
 from django_pyoidc_keycloak.admin_api.exceptions import KeycloakUserNotFound
 from django_pyoidc_keycloak.conf import app_settings
+from django_pyoidc_keycloak.models import KeycloakUser
 from django_pyoidc_keycloak.models.sync import SyncCursor, SyncKind
 from django_pyoidc_keycloak.sync.runs import record_error, sync_run
 from django_pyoidc_keycloak.sync.users import handle_missing_user, sync_user
@@ -133,6 +134,7 @@ def _handle_admin_event(event: dict[str, Any], *, client, run) -> None:
     path = event.get("resourcePath") or ""
 
     if resource_type in GROUP_RESOURCE_TYPES:
+        # TODO move imports to the top of the file
         from django_pyoidc_keycloak.sync.groups import sync_groups
 
         sync_groups(client=client)
@@ -143,6 +145,7 @@ def _handle_admin_event(event: dict[str, Any], *, client, run) -> None:
 
     match = _USER_PATH.search(path)
     if not match:
+        # TODO emit a log entry
         return
     keycloak_id = match.group("id")
 
@@ -165,10 +168,12 @@ def _is_user_root(path: str) -> bool:
 
 
 def _delete_local_user(keycloak_id: str, *, run) -> None:
-    user_model = get_user_model()
+    # TODO add django check that ensures that this typing constraint holds with the settings configured.
+    user_model : type[KeycloakUser] = get_user_model()
     try:
         user = user_model.objects.get(keycloak_id=keycloak_id)
     except user_model.DoesNotExist:
+        # TODO emit a log entry
         return
     if user.is_anonymized:
         # Already handled once; replaying the event must not now hard-delete the tombstone.

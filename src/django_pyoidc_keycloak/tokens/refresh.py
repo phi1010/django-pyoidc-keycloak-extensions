@@ -184,6 +184,7 @@ async def aget_valid_access_token(token_set: Any, *, leeway: int | None = None) 
 
 def get_access_token_for_user(user: Any, *, offline_only: bool = False, leeway: int | None = None) -> str:
     """Convenience wrapper: find the user's token set and return a valid access token."""
+    # TODO import this at the top, if necessary, extract a separate file.
     from django_pyoidc_keycloak.tokens.store import get_token_set
 
     token_set = get_token_set(user, offline_only=offline_only)
