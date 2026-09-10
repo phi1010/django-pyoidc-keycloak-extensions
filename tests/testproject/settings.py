@@ -56,7 +56,10 @@ ROOT_URLCONF = "tests.testproject.urls"
 
 AUTH_USER_MODEL = "keycloak.KeycloakUser"
 
-AUTHENTICATION_BACKENDS = ["tests.testproject.backend.StubPolicyBackend"]
+AUTHENTICATION_BACKENDS = [
+    "django_pyoidc_keycloak.backends.KeycloakSessionBackend",
+    "tests.testproject.backend.StubPolicyBackend",
+]
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -80,5 +83,4 @@ DJANGO_PYOIDC = {
 
 KEYCLOAK = {
     "OP_NAME": "sso",
-    "AUTH_BACKEND": "tests.testproject.backend.StubPolicyBackend",
 }

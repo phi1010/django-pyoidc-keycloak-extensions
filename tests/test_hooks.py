@@ -63,11 +63,13 @@ def test_a_login_without_a_sub_is_refused():
         get_user(_Client(), {"id_token_claims": {"email": "alice@example.org"}})
 
 
-def test_the_backend_is_stamped_so_auth_login_works():
-    """With more than one backend configured, auth.login() raises without this."""
+def test_the_session_backend_is_stamped_so_auth_login_works():
+    """auth.login() refuses to guess with several backends, and auth.get_user() only calls
+    get_user() on the backend recorded here -- so it must be the session backend, never the
+    project's policy backend."""
     user = get_user(_Client(), tokens_for())
 
-    assert user.backend == "tests.testproject.backend.StubPolicyBackend"
+    assert user.backend == "django_pyoidc_keycloak.backends.KeycloakSessionBackend"
 
 
 def test_a_username_collision_at_login_is_resolved():

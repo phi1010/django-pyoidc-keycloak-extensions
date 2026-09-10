@@ -59,9 +59,13 @@ INSTALLED_APPS = [
 
 AUTH_USER_MODEL = "keycloak.KeycloakUser"
 
-# Your policy engine decides every permission. ModelBackend must NOT be here:
-# a system check rejects it, because it would answer has_perm() from the database.
-AUTHENTICATION_BACKENDS = ["myproject.authz.OPABackend"]
+# The first backend resolves the logged-in user from the session on every request; the
+# second decides every permission. ModelBackend must NOT be here: a system check rejects
+# it, because it would answer has_perm() from the database.
+AUTHENTICATION_BACKENDS = [
+    "django_pyoidc_keycloak.backends.KeycloakSessionBackend",
+    "myproject.authz.OPABackend",
+]
 
 SALT_KEY = env("SALT_KEY")  # token encryption; see "Token encryption" below
 
@@ -81,30 +85,35 @@ DJANGO_PYOIDC = {
 
 KEYCLOAK = {
     "OP_NAME": "sso",
-    "AUTH_BACKEND": "myproject.authz.OPABackend",
 }
 ```
 
 ### Your authorization backend
 
-It must provide:
+Permissions only -- nothing about users:
 
 ```python
 class OPABackend:
-    def authenticate(self, request, **credentials):
-        return None  # login happens through OIDC
-
-    def get_user(self, user_id):  # required: session auth calls this on every request
-        ...
-
     def has_perm(self, user_obj, perm, obj=None): ...
     def has_module_perms(self, user_obj, app_label): ...
     def get_all_permissions(self, user_obj, obj=None):  # optional; the admin index uses it
         ...
 ```
 
+Every configured backend is asked in turn, so your backend does not have to be the one the
+session records.  In particular it needs no `get_user`: Django resolves the logged-in user
+by calling `get_user()` on the backend stored in the session, and
+`KeycloakSessionBackend` -- shipped with this library -- is what serves that request.  It
+does the primary-key lookup and nothing else, so a deactivated or anonymised account stops
+resolving to a session immediately, and no permission ever comes out of the database.
+
 `is_superuser` short-circuits to `True` before your backend is consulted, and `is_staff`
 gates admin access.
+
+`KeycloakSessionBackend` must appear in `AUTHENTICATION_BACKENDS` (system check
+`keycloak.E004`): `django.contrib.auth` ignores a session backend that is not listed there
+and silently falls back to `AnonymousUser` on every request.  You may subclass it; the
+library discovers it by type.
 
 ## Scheduling
 
@@ -160,7 +169,6 @@ which is exempt from SSO Session Max.
 | `SYNC_GROUPS` | `True` | Mirror group membership. |
 | `USERNAME_STRATEGY` | built-in | Dotted path to your own username derivation. |
 | `STAFF_ROLES` / `SUPERUSER_ROLES` | `[]` | Realm roles that map to `is_staff` / `is_superuser`. |
-| `AUTH_BACKEND` | auto | Backend recorded on the user at login; required if several. |
 | `CREATE_DJANGO_PERMISSIONS` | `False` | Let Django populate `auth_permission` again. |
 | `STORE_TOKENS` | `True` | Store raw tokens at login. |
 | `REQUEST_OFFLINE_ACCESS` | `False` | Request `offline_access` scope. |

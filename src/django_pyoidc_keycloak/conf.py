@@ -31,7 +31,6 @@ DEFAULTS: dict[str, Any] = {
     "USER_PAGE_SIZE": 100,
     "ADMIN_BULK_INLINE_LIMIT": 50,
     # Authorization. Permissions are never stored locally; a project's own backend decides.
-    "AUTH_BACKEND": None,
     "CREATE_DJANGO_PERMISSIONS": False,
     # Tokens.
     "STORE_TOKENS": True,

@@ -39,21 +39,29 @@ def test_an_empty_backend_list_is_rejected(settings):
     assert "keycloak.E002" in ids
 
 
-def test_several_backends_need_an_explicit_choice(settings):
-    settings.AUTHENTICATION_BACKENDS = ["tests.testproject.backend.StubPolicyBackend", "a.B"]
-    settings.KEYCLOAK = {**settings.KEYCLOAK, "AUTH_BACKEND": None}
-
-    ids = [problem.id for problem in check_authentication_backends(None)]
-
-    assert "keycloak.E003" in ids
-
-
-def test_a_backend_that_is_not_configured_is_rejected(settings):
-    settings.KEYCLOAK = {**settings.KEYCLOAK, "AUTH_BACKEND": "not.Configured"}
+def test_a_missing_session_backend_is_rejected(settings):
+    """Without it every request is silently anonymous, so this must be an error."""
+    settings.AUTHENTICATION_BACKENDS = ["tests.testproject.backend.StubPolicyBackend"]
 
     ids = [problem.id for problem in check_authentication_backends(None)]
 
     assert "keycloak.E004" in ids
+
+
+def test_a_subclassed_session_backend_satisfies_the_check(settings):
+    settings.AUTHENTICATION_BACKENDS = ["tests.testproject.backend.SubclassedSessionBackend"]
+
+    ids = [problem.id for problem in check_authentication_backends(None)]
+
+    assert "keycloak.E004" not in ids
+
+
+def test_the_retired_auth_backend_setting_is_flagged(settings):
+    settings.KEYCLOAK = {**settings.KEYCLOAK, "AUTH_BACKEND": "myproject.authz.OPABackend"}
+
+    ids = [problem.id for problem in check_authentication_backends(None)]
+
+    assert "keycloak.W004" in ids
 
 
 def test_the_default_configuration_passes():

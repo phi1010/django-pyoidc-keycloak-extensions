@@ -1,14 +1,15 @@
 """A stand-in for the project's own policy backend (Open Policy Agent in production).
 
 It exists to prove the delegation contract: nothing is read from the database, and the
-library never answers a permission question itself.
+library never answers a permission question itself.  Note what is absent: no ``get_user``.
+Resolving a session to a user is KeycloakSessionBackend's job, not a policy engine's.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from django.contrib.auth import get_user_model
+from django_pyoidc_keycloak.backends import KeycloakSessionBackend
 
 
 class StubPolicyBackend:
@@ -22,13 +23,6 @@ class StubPolicyBackend:
     def authenticate(self, request: Any, **credentials: Any) -> None:
         # Logging in happens through OIDC, never through this backend.
         return None
-
-    def get_user(self, user_id: Any) -> Any:
-        user_model = get_user_model()
-        try:
-            return user_model.objects.get(pk=user_id)
-        except user_model.DoesNotExist:
-            return None
 
     def has_perm(self, user_obj: Any, perm: str, obj: Any = None) -> bool:
         type(self).calls.append(("has_perm", getattr(user_obj, "username", ""), perm))
@@ -49,3 +43,7 @@ class StubPolicyBackend:
     def reset(cls) -> None:
         cls.policy = {}
         cls.calls = []
+
+
+class SubclassedSessionBackend(KeycloakSessionBackend):
+    """Proves the session backend is discovered by type, not by dotted path."""

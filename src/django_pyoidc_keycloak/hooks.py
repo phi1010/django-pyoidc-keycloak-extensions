@@ -14,11 +14,11 @@ import logging
 import uuid
 from typing import Any
 
-from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import SuspiciousOperation
 from django.utils import timezone
 
+from django_pyoidc_keycloak.backends import resolve_session_backend_path
 from django_pyoidc_keycloak.conf import app_settings
 from django_pyoidc_keycloak.models import KeycloakUser
 from django_pyoidc_keycloak.signals import user_created
@@ -37,20 +37,6 @@ def _claim(tokens: dict[str, Any], name: str) -> Any:
         if isinstance(claims, dict) and claims.get(name) is not None:
             return claims[name]
     return None
-
-
-def _resolve_backend_path() -> str:
-    configured = app_settings.AUTH_BACKEND
-    if configured:
-        return str(configured)
-    backends = list(getattr(settings, "AUTHENTICATION_BACKENDS", []))
-    if len(backends) == 1:
-        return backends[0]
-    msg = (
-        "Cannot decide which authentication backend to record on the user. "
-        "Set KEYCLOAK['AUTH_BACKEND'] to the dotted path of your authorization backend."
-    )
-    raise SuspiciousOperation(msg)
 
 
 def _representation_from_claims(tokens: dict[str, Any], sub: str) -> dict[str, Any]:
@@ -114,8 +100,8 @@ def get_user(client: Any, tokens: dict[str, Any]) -> Any:
     if app_settings.STORE_TOKENS:
         stash_tokens(user, extract_raw_tokens(client, tokens))
 
-    # auth.login() refuses to guess when several backends are configured.
-    user.backend = _resolve_backend_path()
+    # auth.login() records this path in the session; get_user() resolves the user through it.
+    user.backend = resolve_session_backend_path()
     return user
 
 

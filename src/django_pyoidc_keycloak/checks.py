@@ -6,7 +6,9 @@ from typing import Any
 
 from django.conf import settings
 from django.core.checks import Error, Warning, register
+from django.utils.module_loading import import_string
 
+from django_pyoidc_keycloak.backends import KeycloakSessionBackend
 from django_pyoidc_keycloak.conf import app_settings
 
 MODEL_BACKEND = "django.contrib.auth.backends.ModelBackend"
@@ -15,7 +17,7 @@ MODEL_BACKEND = "django.contrib.auth.backends.ModelBackend"
 @register()
 def check_authentication_backends(app_configs: Any, **kwargs: Any) -> list:
     """The stock ModelBackend would reintroduce database-backed permission lookups."""
-    problems = []
+    problems: list[Error | Warning] = []
     backends = list(getattr(settings, "AUTHENTICATION_BACKENDS", []))
 
     if MODEL_BACKEND in backends:
@@ -35,32 +37,52 @@ def check_authentication_backends(app_configs: Any, **kwargs: Any) -> list:
         problems.append(
             Error(
                 "AUTHENTICATION_BACKENDS is empty.",
-                hint="Configure the authorization backend that answers has_perm() and get_user().",
+                hint="Configure the authorization backend that answers has_perm().",
                 id="keycloak.E002",
             )
         )
 
-    configured = app_settings.AUTH_BACKEND
-    if configured is None and len(backends) > 1:
+    if not _has_session_backend(backends):
         problems.append(
             Error(
-                "Several authentication backends are configured but KEYCLOAK['AUTH_BACKEND'] is unset.",
+                "No KeycloakSessionBackend in AUTHENTICATION_BACKENDS.",
                 hint=(
-                    "hook_get_user must stamp user.backend before auth.login(), and Django cannot "
-                    "guess which backend to record. Name it in KEYCLOAK['AUTH_BACKEND']."
+                    "auth.get_user() resolves the logged-in user by calling get_user() on the "
+                    "backend recorded in the session, and ignores a backend that is not listed -- "
+                    "every request would silently be anonymous. Add "
+                    "'django_pyoidc_keycloak.backends.KeycloakSessionBackend'."
                 ),
-                id="keycloak.E003",
-            )
-        )
-    elif configured is not None and configured not in backends:
-        problems.append(
-            Error(
-                f"KEYCLOAK['AUTH_BACKEND'] is {configured!r}, which is not in AUTHENTICATION_BACKENDS.",
                 id="keycloak.E004",
             )
         )
 
+    if "AUTH_BACKEND" in (getattr(settings, "KEYCLOAK", {}) or {}):
+        problems.append(
+            Warning(
+                "KEYCLOAK['AUTH_BACKEND'] is set but no longer used.",
+                hint=(
+                    "The library now resolves sessions through its own KeycloakSessionBackend, so "
+                    "your authorization backend no longer needs a get_user(). Remove the setting."
+                ),
+                id="keycloak.W004",
+            )
+        )
+
     return problems
+
+
+def _has_session_backend(backends: list) -> bool:
+    """True when one of the configured backends can resolve a session to a user."""
+    for path in backends:
+        try:
+            backend = import_string(path)
+        except ImportError:
+            # A backend that cannot even be imported is Django's own error to report.
+            continue
+        # issubclass, not isinstance: a system check must not instantiate project backends.
+        if isinstance(backend, type) and issubclass(backend, KeycloakSessionBackend):
+            return True
+    return False
 
 
 @register()

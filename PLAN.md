@@ -104,6 +104,7 @@ src/django_pyoidc_keycloak/
         concrete.py         # KeycloakUser, KeycloakGroup, GroupMembership
         sync.py             # SyncRun, SyncCursor
         tokens.py           # OIDCTokenSet
+    backends.py             # KeycloakSessionBackend (session resolution, no permissions)
     permissions.py          # KeycloakAuthorizationMixin, AuthorizationBackendProtocol
     managers.py             # KeycloakUserManager
     admin_api/
@@ -209,18 +210,26 @@ without any permission storage:
 
 **What the project's OPA backend must implement** (documented contract, with an
 `AuthorizationBackendProtocol` typing protocol shipped for reference):
-`has_perm(user_obj, perm, obj=None)`, `has_module_perms(user_obj, app_label)`, optionally
+`has_perm(user_obj, perm, obj=None)`, `has_module_perms(user_obj, app_label)`, and optionally
 `get_all_permissions(user_obj, obj=None)` (the admin's index page and some third-party apps call
-it), and `get_user(user_id)` — required for session authentication to resolve the logged-in user on
-each request. `authenticate()` may return `None`, since login happens through OIDC.
+it). Authorization only — a policy engine is never asked to handle users.
 
 `django.contrib.auth.models.ModelBackend` is **not** used and should not appear in
 `AUTHENTICATION_BACKENDS`; a system check errors if it does, since its presence would silently
 reintroduce database-backed permission lookups.
 
-Because `hook_get_user` must stamp `user.backend` before `auth.login()`, the backend path comes
-from `KEYCLOAK["AUTH_BACKEND"]`, defaulting to the sole entry in `AUTHENTICATION_BACKENDS` when
-exactly one is configured, and raising a system check error when it is ambiguous.
+**Session resolution is a separate backend** (`backends.py`). Django's session stores only the
+user's primary key plus the dotted path of the backend that logged it in, and
+`django.contrib.auth.get_user()` calls `get_user(user_id)` on *that* backend to rebuild the
+instance. Upstream django-pyoidc offloads this to `ModelBackend`, which is exactly what we
+forbid — so the library ships `KeycloakSessionBackend`: a primary-key lookup filtered on
+`is_active` (which also excludes anonymised tombstones), `authenticate()` returning `None`, and
+no permission methods at all. `hook_get_user` stamps its path on `user.backend` before
+`auth.login()`, discovering it from `AUTHENTICATION_BACKENDS` by type so that subclasses work and
+the recorded string is byte-for-byte a configured entry — `auth.get_user()` compares against that
+list and silently returns `AnonymousUser` when the path is not in it. A system check
+(`keycloak.E004`) errors when no such backend is configured, since the failure is otherwise
+invisible.
 
 ### Keeping permission rows out of the database
 
@@ -328,7 +337,7 @@ realm-unique, because a stale local row may still hold a name that KC has since 
 Resolves the user by the `sub` claim against `keycloak_id`, creating the row when absent, then
 optionally refreshes fields (`KEYCLOAK["SYNC_ON_LOGIN"]`). Two details `get_user_by_email` shows
 are mandatory (`__init__.py:80-81`): it must set
-`user.backend` to the configured OPA backend path (`KEYCLOAK["AUTH_BACKEND"]`) — with more than one
+`user.backend` to the `KeycloakSessionBackend` path — with more than one
 entry in `AUTHENTICATION_BACKENDS`, `auth.login()` raises without an explicit backend — and it must return a
 user for which `is_authenticated` is true, or the callback view treats login as failed
 (`views.py:414`).
@@ -509,7 +518,7 @@ A single `KEYCLOAK = {...}` dict with a typed accessor and defaults: `SERVER_URL
 `ADMIN_CLIENT_ID` / `ADMIN_CLIENT_SECRET` (both unset by default — credentials come from
 django-pyoidc's provider config), `IMPORT_ALL_USERS` (False), `REQUEST_OFFLINE_ACCESS`
 (False), `SYNC_ON_LOGIN` (True), `USERNAME_STRATEGY`, `STAFF_ROLES`, `SUPERUSER_ROLES`,
-`AUTH_BACKEND`, `CREATE_DJANGO_PERMISSIONS` (False),
+`CREATE_DJANGO_PERMISSIONS` (False),
 `EVENT_OVERLAP_SECONDS`, `ADMIN_BULK_INLINE_LIMIT`, `TOKEN_ENCRYPTION_KEY`. Django system checks in
 `apps.py` validate the combination at startup (missing secret, backend not installed,
 `AUTH_USER_MODEL` mismatch, offline access requested without a refresh-capable client).

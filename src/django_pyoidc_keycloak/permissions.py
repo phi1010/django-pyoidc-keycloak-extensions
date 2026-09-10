@@ -27,17 +27,19 @@ from django_pyoidc_keycloak.conf import app_settings
 class AuthorizationBackendProtocol(Protocol):
     """The contract a project's authorization backend must satisfy.
 
-    ``get_user`` is not optional: Django's session authentication calls it on every request
-    to resolve the logged-in user.  ``authenticate`` may return ``None``, since logging in
-    happens through OIDC rather than through the backend.
+    Authorization only: resolving the logged-in user from the session is a separate job,
+    handled by :class:`~django_pyoidc_keycloak.backends.KeycloakSessionBackend` so that a
+    policy engine is only ever asked whether a permission is granted.  ``authenticate`` is
+    not required either, since logging in happens through OIDC rather than through a
+    backend.
+
+    ``get_all_permissions`` is optional; the admin index page and some third-party apps call
+    it when it is present.
     """
 
     def has_perm(self, user_obj: Any, perm: str, obj: Any = None) -> bool: ...
 
     def has_module_perms(self, user_obj: Any, app_label: str) -> bool: ...
-
-    # TODO explain why this is not provided by the sessionmiddleware.
-    def get_user(self, user_id: Any) -> Any: ...
 
 
 def _delegate(user: Any, method: str, *args: Any) -> bool:
