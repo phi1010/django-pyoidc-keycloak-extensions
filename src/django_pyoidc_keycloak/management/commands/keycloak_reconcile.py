@@ -6,11 +6,14 @@ the local database eventually matches the realm.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.core.management.base import BaseCommand
 
 from django_pyoidc_keycloak.sync.reconcile import full_reconcile
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -25,6 +28,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args: Any, **options: Any) -> None:
+        # The pass itself logs its own progress; this records how it was invoked.
+        logger.debug(
+            "keycloak_reconcile invoked with --dry-run=%s --import-all=%s",
+            options["dry_run"],
+            options["import_all"],
+        )
         stats = full_reconcile(
             import_all=True if options["import_all"] else None,
             dry_run=options["dry_run"],

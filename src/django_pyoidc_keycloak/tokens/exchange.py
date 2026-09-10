@@ -55,10 +55,19 @@ def exchange_access_token(
         # Only scopes already assigned to the requesting client are accepted.
         data["scope"] = scope
 
+    # The audience and the requested type are safe to log; `data` never is.
+    logger.debug(
+        "Exchanging a token for audience %r (requested type %s, scope %r)",
+        audience,
+        requested_token_type,
+        scope,
+    )
+
     with httpx.Client(timeout=app_settings.REQUEST_TIMEOUT) as client:
         response = client.post(connection.token_endpoint, data=data)
 
     if response.status_code >= 400:
+        logger.debug("Token exchange for audience %r was refused with %d", audience, response.status_code)
         detail = scrub_text(response.text)
         if response.status_code in (400, 403):
             msg = (
@@ -75,6 +84,7 @@ def exchange_access_token(
     if not token:
         msg = "Keycloak returned no access_token for the exchange."
         raise TokensUnavailable(msg)
+    logger.debug("Token exchange for audience %r succeeded", audience)
     return str(token)
 
 
@@ -94,8 +104,10 @@ def exchange_token(
     from django_pyoidc_keycloak.tokens.refresh import get_access_token_for_user, get_valid_access_token
 
     if isinstance(user_or_token_set, OIDCTokenSet):
+        logger.debug("Using token set %s as the exchange subject", user_or_token_set.pk)
         subject_token = get_valid_access_token(user_or_token_set)
     else:
+        logger.debug("Resolving a subject token for user %s", getattr(user_or_token_set, "pk", None))
         subject_token = get_access_token_for_user(user_or_token_set)
 
     return exchange_access_token(

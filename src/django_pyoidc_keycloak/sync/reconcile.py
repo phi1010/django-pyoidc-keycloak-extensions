@@ -16,6 +16,7 @@ from django_pyoidc_keycloak.admin_api.exceptions import KeycloakUserNotFound
 from django_pyoidc_keycloak.conf import app_settings
 from django_pyoidc_keycloak.models import KeycloakUser
 from django_pyoidc_keycloak.models.sync import SyncKind
+from django_pyoidc_keycloak.scrub import scrub_exception
 from django_pyoidc_keycloak.sync.groups import sweep_expired_memberships, sync_groups
 from django_pyoidc_keycloak.sync.runs import record_error, sync_run
 from django_pyoidc_keycloak.sync.users import handle_missing_user, sync_user
@@ -37,6 +38,13 @@ def full_reconcile(*, client=None, import_all: bool | None = None, dry_run: bool
 
     stats = {"created": 0, "updated": 0, "deleted": 0, "anonymized": 0, "skipped": 0, "groups": 0}
 
+    logger.info(
+        "Starting a full reconcile of realm %s (import_all=%s, dry_run=%s)",
+        client.connection.realm,
+        import_all,
+        dry_run,
+    )
+
     with sync_run(SyncKind.RECONCILE, realm=client.connection.realm) as run:
         if app_settings.SYNC_GROUPS and not dry_run:
             group_counts = sync_groups(client=client)
@@ -49,18 +57,24 @@ def full_reconcile(*, client=None, import_all: bool | None = None, dry_run: bool
 
             exists_locally = user_model.objects.filter(keycloak_id=keycloak_id).exists()
             if not exists_locally and not import_all:
+                logger.debug("Realm user %s has no local row and IMPORT_ALL_USERS is off; skipping", keycloak_id)
                 stats["skipped"] += 1
                 run.skipped += 1
                 continue
 
             if dry_run:
+                logger.debug(
+                    "Dry run: would %s local user for %s",
+                    "create a" if not exists_locally else "refresh the",
+                    keycloak_id,
+                )
                 stats["created" if not exists_locally else "updated"] += 1
                 continue
 
             try:
                 sync_user(representation, client=client, create=True)
             except Exception as exc:
-                record_error(run, f"Syncing {keycloak_id}: {exc}")
+                record_error(run, f"Syncing {keycloak_id}: {scrub_exception(exc)}")
                 continue
 
             if exists_locally:
@@ -70,22 +84,26 @@ def full_reconcile(*, client=None, import_all: bool | None = None, dry_run: bool
                 stats["created"] += 1
                 run.created += 1
 
+        logger.debug("The realm listed %d user(s) in total", len(seen_ids))
         stats.update(_remove_vanished_users(client, seen_ids, run=run, dry_run=dry_run))
 
         if not dry_run:
             sweep_expired_memberships()
 
+    logger.info("Full reconcile of realm %s finished: %s", client.connection.realm, stats)
     return stats
 
 
 def _remove_vanished_users(client, seen_ids: set[str], *, run, dry_run: bool) -> dict[str, int]:
     """Confirm and remove local users that the realm listing did not mention."""
-    user_model : type[KeycloakUser] = get_user_model()
+    user_model: type[KeycloakUser] = get_user_model()
     counts = {"deleted": 0, "anonymized": 0}
 
     candidates = user_model.objects.filter(keycloak_id__isnull=False, is_anonymized=False).exclude(
         keycloak_id__in=seen_ids
     )
+
+    logger.debug("%d local user(s) were not in the realm listing; confirming each", candidates.count())
 
     for user in candidates.iterator():
         try:
@@ -93,6 +111,7 @@ def _remove_vanished_users(client, seen_ids: set[str], *, run, dry_run: bool) ->
             client.get_user(str(user.keycloak_id))
         except KeycloakUserNotFound:
             if dry_run:
+                logger.debug("Dry run: would remove local user %s, gone from Keycloak", user.keycloak_id)
                 counts["deleted"] += 1
                 continue
             outcome = handle_missing_user(user)
@@ -102,7 +121,9 @@ def _remove_vanished_users(client, seen_ids: set[str], *, run, dry_run: bool) ->
             else:
                 run.anonymized += 1
         except Exception as exc:
-            record_error(run, f"Confirming {user.keycloak_id}: {exc}")
+            record_error(run, f"Confirming {user.keycloak_id}: {scrub_exception(exc)}")
+        else:
+            logger.debug("Local user %s still exists in Keycloak; the listing had raced", user.keycloak_id)
 
     return counts
 
@@ -112,9 +133,12 @@ def sync_users(users: Any, *, client=None) -> dict[str, int]:
     client = client or get_admin_client()
     stats = {"updated": 0, "deleted": 0, "anonymized": 0, "errors": 0}
 
+    logger.debug("Refreshing a specific set of users against realm %s", client.connection.realm)
+
     with sync_run(SyncKind.MANUAL, realm=client.connection.realm) as run:
         for user in users:
             if user.keycloak_id is None:
+                logger.debug("User %s is not managed by Keycloak; skipping", user.pk)
                 run.skipped += 1
                 continue
             try:
@@ -130,6 +154,7 @@ def sync_users(users: Any, *, client=None) -> dict[str, int]:
                     run.anonymized += 1
             except Exception as exc:
                 stats["errors"] += 1
-                record_error(run, f"Syncing {user.keycloak_id}: {exc}")
+                record_error(run, f"Syncing {user.keycloak_id}: {scrub_exception(exc)}")
 
+    logger.info("Refreshed a set of users on realm %s: %s", client.connection.realm, stats)
     return stats

@@ -16,6 +16,7 @@ from django.utils.module_loading import import_string
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
 from django_pyoidc_keycloak.conf import app_settings
 from django_pyoidc_keycloak.models import KeycloakUser
+from django_pyoidc_keycloak.scrub import scrub_exception
 from django_pyoidc_keycloak.signals import user_anonymized, user_created, user_deleted, user_synced
 
 logger = logging.getLogger(__name__)
@@ -43,12 +44,18 @@ def _role_names(client, keycloak_id: str) -> set[str]:
     try:
         return {role.get("name", "") for role in client.get_user_realm_roles(keycloak_id)}
     except Exception as exc:  # a missing role-mapping read must not fail the whole sync
-        logger.warning("Could not read realm roles for %s: %s", keycloak_id, exc)
+        logger.warning("Could not read realm roles for %s: %s", keycloak_id, scrub_exception(exc))
         return set()
 
 
 def apply_representation(user: Any, representation: dict[str, Any], *, client=None) -> list[str]:
     """Copy Keycloak's view of the account onto the local row. Returns the changed fields."""
+    # Keys only: the values are the account's personal data, and this runs on every login.
+    logger.debug(
+        "Applying a Keycloak representation to user %s; it carries the keys %s",
+        user.pk,
+        sorted(representation),
+    )
     changed: list[str] = []
 
     for source, target in SIMPLE_FIELDS.items():
@@ -88,6 +95,13 @@ def apply_representation(user: Any, representation: dict[str, Any], *, client=No
     superuser_roles = set(app_settings.SUPERUSER_ROLES or [])
     if (staff_roles or superuser_roles) and client is not None and representation.get("id"):
         roles = _role_names(client, str(representation["id"]))
+        logger.debug(
+            "Mapping realm roles for %s: %d role(s) read, %d staff and %d superuser role(s) configured",
+            user.pk,
+            len(roles),
+            len(staff_roles),
+            len(superuser_roles),
+        )
         if staff_roles:
             is_staff = bool(roles & staff_roles)
             if user.is_staff != is_staff:
@@ -99,6 +113,8 @@ def apply_representation(user: Any, representation: dict[str, Any], *, client=No
                 user.is_superuser = is_superuser
                 changed.append("is_superuser")
 
+    # Field names only -- never the old or new values.
+    logger.debug("Representation changed %d field(s) on user %s: %s", len(changed), user.pk, changed or "none")
     return changed
 
 
@@ -122,6 +138,7 @@ def sync_user(
         if keycloak_id is None:
             msg = "sync_user() needs either a representation or a keycloak_id."
             raise ValueError(msg)
+        logger.debug("No representation given for %s; reading it from the Admin API", keycloak_id)
         representation = client.get_user(str(keycloak_id))
 
     kc_id = representation.get("id") or keycloak_id
@@ -136,18 +153,28 @@ def sync_user(
         user = user_model.objects.get(keycloak_id=kc_id)
     except user_model.DoesNotExist:
         if create is False:
+            logger.debug("No local user for %s and create=False; skipping", kc_id)
             return None
+        logger.debug("No local user for %s; creating one", kc_id)
         user = user_model(keycloak_id=kc_id)
         user.set_unusable_password()
         created_now = True
 
     if user.is_anonymized:
         # The account was deleted in Keycloak once already; do not resurrect it.
+        logger.debug("User %s is an anonymised tombstone; refusing to resurrect it", kc_id)
         return user
 
     changed = apply_representation(user, representation, client=client)
     user.last_synced_at = timezone.now()
     _save_with_username_retry(user, representation)
+
+    logger.debug(
+        "%s local user %s from Keycloak %s",
+        "Created" if created_now else "Refreshed",
+        user.pk,
+        kc_id,
+    )
 
     if sync_groups is None:
         sync_groups = bool(app_settings.SYNC_GROUPS)
@@ -176,7 +203,14 @@ def _save_with_username_retry(user: Any, representation: dict[str, Any], attempt
                 user.save()
         except IntegrityError:
             if attempt + 1 == attempts:
+                logger.debug("Giving up on a free username for %s after %d attempt(s)", user.pk, attempts)
                 raise
+            # Another login claimed the name between the uniqueness check and the save.
+            logger.debug(
+                "Username collision saving user %s on attempt %d; deriving another",
+                user.pk,
+                attempt + 1,
+            )
             user.username = derive(representation, exclude_pk=user.pk)
         else:
             return
@@ -204,7 +238,8 @@ def anonymize(user: Any) -> None:
     # keycloak_id is deliberately kept as a tombstone, so the same Keycloak account is never
     # re-imported as a fresh user.
     user.save()
-    user.memberships.all().delete()
+    dropped, _ = user.memberships.all().delete()
+    logger.info("Anonymised user %s (keycloak_id %s), dropping %d membership(s)", user.pk, user.keycloak_id, dropped)
     user_anonymized.send(sender=type(user), user=user)
 
 
@@ -226,15 +261,21 @@ def delete_or_anonymize(user: Any) -> str:
         savepoint = _create_savepoint()
         try:
             user.delete()
-        except ProtectedError, RestrictedError, IntegrityError:
+        except (ProtectedError, RestrictedError, IntegrityError) as exc:
             # Something references this user with PROTECT/RESTRICT, or a database-level
             # foreign key rejected the deletion. Keep the row, drop the personal data.
+            logger.debug(
+                "Deleting user %s was refused by the database (%s); anonymising instead",
+                keycloak_id,
+                type(exc).__name__,
+            )
             transaction.savepoint_rollback(savepoint)
             user.refresh_from_db()
             anonymize(user)
             return "anonymized"
         transaction.savepoint_commit(savepoint)
 
+    logger.info("Deleted local user for Keycloak %s", keycloak_id)
     user_deleted.send(sender=user_model, keycloak_id=keycloak_id, username=username)
     return "deleted"
 

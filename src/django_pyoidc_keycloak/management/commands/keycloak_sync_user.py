@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.contrib.auth import get_user_model
@@ -9,6 +10,8 @@ from django.core.management.base import BaseCommand, CommandError
 
 from django_pyoidc_keycloak.admin_api.exceptions import KeycloakUserNotFound
 from django_pyoidc_keycloak.sync.users import handle_missing_user, sync_user
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -28,6 +31,9 @@ class Command(BaseCommand):
                 msg = f"{identifier!r} is a local-only account with no Keycloak id."
                 raise CommandError(msg)
             keycloak_id = str(local_user.keycloak_id)
+            logger.debug("Resolved the local account to Keycloak %s", keycloak_id)
+
+        logger.debug("Synchronising a single user: Keycloak %s", keycloak_id)
 
         try:
             user = sync_user(keycloak_id=keycloak_id, create=True)

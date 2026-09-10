@@ -21,6 +21,7 @@ from django.utils import timezone
 from django_pyoidc_keycloak.backends import resolve_session_backend_path
 from django_pyoidc_keycloak.conf import app_settings
 from django_pyoidc_keycloak.models import KeycloakUser
+from django_pyoidc_keycloak.scrub import scrub_exception
 from django_pyoidc_keycloak.signals import user_created
 from django_pyoidc_keycloak.tokens.extract import extract_raw_tokens
 from django_pyoidc_keycloak.tokens.store import find_session, pop_tokens, purge_for_session, stash_tokens, store_tokens
@@ -73,8 +74,9 @@ def get_user(client: Any, tokens: dict[str, Any]) -> Any:
         msg = "The OIDC tokens carry no 'sub' claim, so the user cannot be identified."
         raise SuspiciousOperation(msg)
 
-    user_model : type[KeycloakUser] = get_user_model()
+    user_model: type[KeycloakUser] = get_user_model()
     keycloak_id = uuid.UUID(str(sub))
+    logger.debug("Resolving the local user for Keycloak %s at login", keycloak_id)
 
     try:
         user = user_model.objects.get(keycloak_id=keycloak_id)
@@ -89,6 +91,14 @@ def get_user(client: Any, tokens: dict[str, Any]) -> Any:
         apply_representation(user, representation)
         user.last_synced_at = timezone.now()
     user.save()
+
+    logger.debug(
+        "Login %s local user %s for Keycloak %s (SYNC_ON_LOGIN=%s)",
+        "created" if created else "matched",
+        user.pk,
+        keycloak_id,
+        app_settings.SYNC_ON_LOGIN,
+    )
 
     if created:
         user_created.send(sender=user_model, user=user, representation={"id": str(sub)})
@@ -120,7 +130,7 @@ def _sync_groups_from_login(user: Any, tokens: dict[str, Any], client: Any) -> N
             sync_user_groups(user)
     except Exception as exc:
         # Group synchronisation must never break a login.
-        logger.warning("Could not synchronise groups at login for %s: %s", user.pk, exc)
+        logger.warning("Could not synchronise groups at login for %s: %s", user.pk, scrub_exception(exc))
 
 
 def user_login(request: Any, user: Any) -> None:
@@ -135,7 +145,7 @@ def user_login(request: Any, user: Any) -> None:
     try:
         store_tokens(session=session, user=user, raw=raw)
     except Exception as exc:
-        logger.warning("Could not store tokens for %s: %s", user.pk, exc)
+        logger.warning("Could not store tokens for %s: %s", user.pk, scrub_exception(exc))
 
 
 def user_logout(user_request: Any, logout_request_args: Any = None) -> Any:
@@ -145,7 +155,7 @@ def user_logout(user_request: Any, logout_request_args: Any = None) -> Any:
         if session is not None:
             purge_for_session(session)
     except Exception as exc:
-        logger.warning("Could not purge tokens at logout: %s", exc)
+        logger.warning("Could not purge tokens at logout: %s", scrub_exception(exc))
     return logout_request_args
 
 
@@ -154,4 +164,4 @@ def session_logout(session: Any) -> None:
     try:
         purge_for_session(session)
     except Exception as exc:
-        logger.warning("Could not purge tokens at back-channel logout: %s", exc)
+        logger.warning("Could not purge tokens at back-channel logout: %s", scrub_exception(exc))

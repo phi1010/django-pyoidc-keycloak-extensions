@@ -49,6 +49,7 @@ def _expiry(seconds: Any) -> datetime | None:
 def _perform_refresh(token_set: Any) -> Any:
     """Exchange the refresh token for a new set and store it."""
     connection = get_connection()
+    logger.debug("Refreshing token set %s against %s", token_set.pk, connection.token_endpoint)
     with httpx.Client(timeout=app_settings.REQUEST_TIMEOUT) as client:
         response = client.post(
             connection.token_endpoint,
@@ -62,10 +63,13 @@ def _perform_refresh(token_set: Any) -> Any:
 
     if response.status_code >= 400:
         payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        # Only the status and the OAuth error code -- never the body, which carries tokens.
         error = payload.get("error", "")
+        logger.debug("Refresh of token set %s was refused: %d %s", token_set.pk, response.status_code, error or "-")
         if error in {"invalid_grant", "invalid_token"}:
             # The session is over at Keycloak: the token is useless, so drop it rather than
             # leaving a row that will fail forever.
+            logger.info("Keycloak rejected the refresh token for set %s; dropping it", token_set.pk)
             token_set.delete()
             msg = "The refresh token was rejected by Keycloak; the user must log in again."
             raise TokensUnavailable(msg)
@@ -84,6 +88,7 @@ def _perform_refresh(token_set: Any) -> Any:
     token_set.access_token_expires_at = _expiry(payload.get("expires_in"))
     if payload.get("refresh_token"):
         # Keycloak rotates the refresh token when "Revoke Refresh Token" is enabled.
+        logger.debug("Keycloak rotated the refresh token for set %s", token_set.pk)
         token_set.refresh_token = payload["refresh_token"]
         token_set.refresh_token_expires_at = _expiry(payload.get("refresh_expires_in"))
     if payload.get("id_token"):
@@ -91,6 +96,11 @@ def _perform_refresh(token_set: Any) -> Any:
     if payload.get("scope"):
         token_set.scope = str(payload["scope"])[:500]
     token_set.save()
+    logger.debug(
+        "Token set %s refreshed; the new access token expires %s",
+        token_set.pk,
+        token_set.access_token_expires_at.isoformat() if token_set.access_token_expires_at else "unknown",
+    )
     return token_set
 
 
@@ -103,6 +113,7 @@ def get_valid_access_token(token_set: Any, *, leeway: int | None = None) -> str:
     leeway = int(app_settings.TOKEN_REFRESH_LEEWAY if leeway is None else leeway)
 
     if not token_set.expires_within(leeway) and token_set.access_token:
+        logger.debug("Token set %s is still valid within %ds leeway; no refresh needed", token_set.pk, leeway)
         return token_set.access_token
 
     if not token_set.refresh_token:
@@ -113,10 +124,12 @@ def get_valid_access_token(token_set: Any, *, leeway: int | None = None) -> str:
     nonce = secrets.token_hex(16)
 
     if cache.add(key, nonce, LOCK_TIMEOUT):
+        logger.debug("Took the refresh lock for token set %s", token_set.pk)
         try:
             token_set.refresh_from_db()
             # Someone may have refreshed between our check and acquiring the lock.
             if not token_set.expires_within(leeway) and token_set.access_token:
+                logger.debug("Token set %s was refreshed while we waited for the lock", token_set.pk)
                 return token_set.access_token
             _perform_refresh(token_set)
             return token_set.access_token
@@ -124,17 +137,20 @@ def get_valid_access_token(token_set: Any, *, leeway: int | None = None) -> str:
             # Only release our own lock, never someone else's.
             if cache.get(key) == nonce:
                 cache.delete(key)
+                logger.debug("Released the refresh lock for token set %s", token_set.pk)
 
     return _await_other_refresh(token_set, leeway=leeway)
 
 
 def _await_other_refresh(token_set: Any, *, leeway: int) -> str:
     """Another worker holds the lock; wait briefly for it to write the new token."""
+    logger.debug("Another worker is refreshing token set %s; waiting up to %.1fs", token_set.pk, LOCK_WAIT_TOTAL)
     deadline = time.monotonic() + LOCK_WAIT_TOTAL
     while time.monotonic() < deadline:
         time.sleep(LOCK_POLL_INTERVAL)
         token_set.refresh_from_db()
         if token_set.access_token and not token_set.expires_within(leeway):
+            logger.debug("The other worker refreshed token set %s", token_set.pk)
             return token_set.access_token
     msg = "Timed out waiting for another worker to refresh the access token."
     raise TokensUnavailable(msg)
@@ -153,6 +169,7 @@ async def aget_valid_access_token(token_set: Any, *, leeway: int | None = None) 
     leeway = int(app_settings.TOKEN_REFRESH_LEEWAY if leeway is None else leeway)
 
     if not token_set.expires_within(leeway) and token_set.access_token:
+        logger.debug("Token set %s is still valid within %ds leeway; no refresh needed", token_set.pk, leeway)
         return token_set.access_token
     if not token_set.refresh_token:
         msg = "The access token has expired and no refresh token was stored for this session."
@@ -162,21 +179,26 @@ async def aget_valid_access_token(token_set: Any, *, leeway: int | None = None) 
     nonce = secrets.token_hex(16)
 
     if await cache.aadd(key, nonce, LOCK_TIMEOUT):
+        logger.debug("Took the refresh lock for token set %s", token_set.pk)
         try:
             await sync_to_async(token_set.refresh_from_db)()
             if not token_set.expires_within(leeway) and token_set.access_token:
+                logger.debug("Token set %s was refreshed while we waited for the lock", token_set.pk)
                 return token_set.access_token
             await sync_to_async(_perform_refresh)(token_set)
             return token_set.access_token
         finally:
             if await cache.aget(key) == nonce:
                 await cache.adelete(key)
+                logger.debug("Released the refresh lock for token set %s", token_set.pk)
 
+    logger.debug("Another worker is refreshing token set %s; waiting up to %.1fs", token_set.pk, LOCK_WAIT_TOTAL)
     deadline = time.monotonic() + LOCK_WAIT_TOTAL
     while time.monotonic() < deadline:
         await asyncio.sleep(LOCK_POLL_INTERVAL)
         await sync_to_async(token_set.refresh_from_db)()
         if token_set.access_token and not token_set.expires_within(leeway):
+            logger.debug("The other worker refreshed token set %s", token_set.pk)
             return token_set.access_token
     msg = "Timed out waiting for another worker to refresh the access token."
     raise TokensUnavailable(msg)
@@ -184,11 +206,11 @@ async def aget_valid_access_token(token_set: Any, *, leeway: int | None = None) 
 
 def get_access_token_for_user(user: Any, *, offline_only: bool = False, leeway: int | None = None) -> str:
     """Convenience wrapper: find the user's token set and return a valid access token."""
-    # TODO import this at the top, if necessary, extract a separate file.
     from django_pyoidc_keycloak.tokens.store import get_token_set
 
     token_set = get_token_set(user, offline_only=offline_only)
     if token_set is None:
-        msg = f"No stored tokens for {user}."
+        logger.debug("No stored token set for user %s (offline_only=%s)", getattr(user, "pk", None), offline_only)
+        msg = f"No stored tokens for user {getattr(user, 'pk', None)}."
         raise TokensUnavailable(msg)
     return get_valid_access_token(token_set, leeway=leeway)

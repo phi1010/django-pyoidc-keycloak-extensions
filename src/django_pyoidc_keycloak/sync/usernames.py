@@ -7,11 +7,14 @@ be resolved rather than assumed away.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from typing import Any
 
 from django.contrib.auth import get_user_model
+
+logger = logging.getLogger(__name__)
 
 MAX_LENGTH = 150
 
@@ -58,6 +61,8 @@ def derive_username(representation: dict[str, Any], *, exclude_pk: Any = None) -
         queryset = queryset.exclude(pk=exclude_pk)
 
     if not queryset.filter(username=base).exists():
+        # The name itself is personal data, so only its length is logged.
+        logger.debug("Derived a free username of %d character(s) for Keycloak %s", len(base), representation.get("id"))
         return base
 
     # Reserve room for the suffix rather than truncating it away.
@@ -65,11 +70,21 @@ def derive_username(representation: dict[str, Any], *, exclude_pk: Any = None) -
         tail = f"-{suffix}"
         candidate = f"{base[: MAX_LENGTH - len(tail)]}{tail}"
         if not queryset.filter(username=candidate).exists():
+            logger.debug(
+                "The derived username for Keycloak %s was taken; settled on suffix -%d",
+                representation.get("id"),
+                suffix,
+            )
             return candidate
 
     # Bounded fallback, so a large collision set cannot turn this into a long scan.
     # The Keycloak id is unique by construction, which also breaks ties between two
     # concurrent logins racing for the same name.
+    logger.info(
+        "Exhausted %d numeric username suffixes for Keycloak %s; falling back to a unique suffix",
+        MAX_SUFFIX - 1,
+        representation.get("id"),
+    )
     unique = uuid.uuid4().hex[:12] if not representation.get("id") else str(representation["id"])[:12]
     tail = f"-{unique}"
     return f"{base[: MAX_LENGTH - len(tail)]}{tail}"

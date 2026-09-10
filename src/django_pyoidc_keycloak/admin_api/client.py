@@ -110,6 +110,11 @@ class KeycloakAdminClient:
             return self._token  # type: ignore[return-value]
 
     def _fetch_token(self) -> None:
+        logger.debug(
+            "Fetching a service-account token for client %r on realm %r",
+            self.connection.client_id,
+            self.connection.realm,
+        )
         response = self.http.post(
             self.connection.token_endpoint,
             data={
@@ -132,6 +137,8 @@ class KeycloakAdminClient:
             raise KeycloakAuthenticationError(msg)
         self._token = token
         self._token_expires_at = time.monotonic() + float(payload.get("expires_in", 60))
+        # The lifetime, never the token.
+        logger.debug("Service-account token obtained; it expires in %ss", payload.get("expires_in", 60))
 
     # -- requests -------------------------------------------------------
 
@@ -183,12 +190,24 @@ class KeycloakAdminClient:
             try:
                 response = self.http.request(method, url, headers=headers, **kwargs)
             except httpx.HTTPError as exc:
+                # The class alone: an httpx message can echo back what was sent.
+                logger.debug(
+                    "%s %s failed on attempt %d/%d with %s; retrying",
+                    method,
+                    url,
+                    attempt + 1,
+                    attempts,
+                    type(exc).__name__,
+                )
                 last_error = exc
                 self._sleep_for_attempt(attempt)
                 continue
 
+            logger.debug("%s %s -> %d (attempt %d/%d)", method, url, response.status_code, attempt + 1, attempts)
+
             if response.status_code == 401:
                 # The token expired earlier than advertised; drop it and try once more.
+                logger.debug("The service-account token was rejected; discarding it and retrying")
                 self._token = None
                 if attempt + 1 < attempts:
                     continue
@@ -208,6 +227,7 @@ class KeycloakAdminClient:
                     raise KeycloakUserNotFound(msg)
                 raise KeycloakNotFound(msg)
             if response.status_code == 429 or response.status_code >= 500:
+                logger.debug("Keycloak returned %d; backing off before retrying", response.status_code)
                 last_error = KeycloakAPIError(
                     f"Keycloak returned {response.status_code} for {method} {path}",
                     status_code=response.status_code,

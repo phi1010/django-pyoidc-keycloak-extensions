@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from django_pyoidc_keycloak.scrub import scrub_exception
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,11 +86,12 @@ def extract_raw_tokens(client: Any, tokens: dict[str, Any] | None = None) -> Raw
     try:
         grant_tokens = _iter_grant_tokens(consumer)
     except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("Could not read the pyoidc grant database: %s", exc)
+        logger.warning("Could not read the pyoidc grant database: %s", scrub_exception(exc))
         return result
 
     for token in grant_tokens:
         access = getattr(token, "access_token", None)
+        # Presence only: this loop is walking raw credentials.
         # Prefer the token object matching the access token we were given.
         if result.access_token and access and access != result.access_token:
             continue
@@ -101,6 +104,14 @@ def extract_raw_tokens(client: Any, tokens: dict[str, Any] | None = None) -> Raw
             result.scope = " ".join(scope) if isinstance(scope, (list, tuple)) else str(scope)
         if result.refresh_token and result.id_token:
             break
+
+    logger.debug(
+        "Extracted tokens from the pyoidc consumer -- access: %s, refresh: %s, id: %s, scope: %r",
+        bool(result.access_token),
+        bool(result.refresh_token),
+        bool(result.id_token),
+        result.scope,
+    )
 
     if result.refresh_token is None:
         logger.info(

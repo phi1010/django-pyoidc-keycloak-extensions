@@ -21,12 +21,15 @@ Add it alongside your own authorization backend::
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.module_loading import import_string
+
+logger = logging.getLogger(__name__)
 
 
 class KeycloakSessionBackend:
@@ -48,6 +51,9 @@ class KeycloakSessionBackend:
             # a user disabled in Keycloak loses their session on the next request.
             return user_model.objects.get(pk=user_id, is_active=True)
         except user_model.DoesNotExist:
+            # Django turns this into AnonymousUser without comment, which is very hard to
+            # tell apart from "never logged in" when a session stops working.
+            logger.debug("No active user with primary key %r; this session resolves to anonymous", user_id)
             return None
 
 
@@ -62,6 +68,7 @@ def resolve_session_backend_path() -> str:
     for path in getattr(settings, "AUTHENTICATION_BACKENDS", []):
         # issubclass, not isinstance: no need to instantiate a project's own backends here.
         if issubclass(import_string(path), KeycloakSessionBackend):
+            logger.debug("Session resolution will be recorded against %s", path)
             return str(path)
     msg = (
         "No KeycloakSessionBackend in AUTHENTICATION_BACKENDS, so the logged-in user could "

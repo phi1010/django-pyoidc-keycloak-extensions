@@ -12,6 +12,7 @@ Two things worth noting:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.contrib import admin, messages
@@ -33,6 +34,8 @@ from django_pyoidc_keycloak.models.base import MembershipSource
 from django_pyoidc_keycloak.sync.reconcile import sync_users
 from django_pyoidc_keycloak.sync.users import handle_missing_user, sync_user
 from django_pyoidc_keycloak.tasks import CELERY_AVAILABLE
+
+logger = logging.getLogger(__name__)
 
 # Native groups are replaced by the Keycloak-mirrored model.
 try:
@@ -190,6 +193,7 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
         The verb is ``sync``, not ``change``: see :class:`SyncPermissionMixin`.
         """
         if not self.has_sync_permission(request):
+            logger.debug("Refusing a 'Sync now' request from user %s: no sync permission", request.user.pk)
             raise PermissionDenied
 
         user = self.get_object(request, object_id)
@@ -253,6 +257,13 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
     def _run_sync(self, request: HttpRequest, queryset: Any, *, all_users: bool = False) -> None:
         """Enqueue when Celery is available, otherwise run inline within a size cap."""
         pks = list(queryset.filter(keycloak_id__isnull=False).values_list("pk", flat=True))
+        logger.debug(
+            "Admin synchronisation requested by user %s for %d managed user(s) (all_users=%s, celery=%s)",
+            request.user.pk,
+            len(pks),
+            all_users,
+            CELERY_AVAILABLE,
+        )
         if not pks:
             self.message_user(request, _("None of the selected users are managed by Keycloak."), messages.WARNING)
             return

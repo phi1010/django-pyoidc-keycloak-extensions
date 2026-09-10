@@ -136,6 +136,35 @@ the changelist dropdown.
 No `Permission` row is created for `sync` (none is created for anything -- see
 `CREATE_DJANGO_PERMISSIONS`); the string is simply what your backend is asked about.
 
+## Logging
+
+Every module logs under its own name below `django_pyoidc_keycloak`, so the whole library
+can be turned up at once:
+
+```python
+LOGGING = {
+    "version": 1,
+    "loggers": {
+        "django_pyoidc_keycloak": {"level": "DEBUG", "handlers": ["console"]},
+    },
+}
+```
+
+| Level | What you get |
+| --- | --- |
+| `INFO` | Synchronisation runs and their counts, users deleted or anonymised, event cursors advancing, token sets dropped or purged. |
+| `DEBUG` | Every decision behind those: the poll window, why an event was skipped, which fields a representation changed, each Admin API request and status, refresh-lock contention. |
+| `WARNING` | Something was survivable but did not happen -- a role read that failed, tokens that could not be stored. |
+
+**Nothing logged is a secret or personal data, at any level.** Tokens, client secrets and
+passwords never reach a log record: HTTP response bodies are passed through `scrub()` before
+they are rendered, and request payloads are never logged at all. Accounts are identified by
+`keycloak_id` and local primary key, never by username, email or name; a Keycloak
+representation is logged as its list of *keys*, and a change as its list of *field names*.
+Group paths are logged, since they are realm configuration rather than user data.
+
+`tests/test_logging.py` enforces this with sentinel values, so it stays true.
+
 ## Scheduling
 
 ```cron

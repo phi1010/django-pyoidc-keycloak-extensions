@@ -7,6 +7,7 @@ module extracts the base URI, realm and client credentials from django-pyoidc's 
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -15,6 +16,8 @@ from django.conf import settings as django_settings
 from django.core.exceptions import ImproperlyConfigured
 
 from django_pyoidc_keycloak.conf import app_settings
+
+logger = logging.getLogger(__name__)
 
 _REALM_RE = re.compile(r"/realms/(?P<realm>[^/]+)")
 
@@ -128,6 +131,14 @@ def get_connection() -> KeycloakConnection:
         )
         raise ImproperlyConfigured(msg)
 
+    # Everything but the secret, which KeycloakConnection's own __repr__ also withholds.
+    logger.debug(
+        "Resolved the Keycloak connection: server %s, realm %r, client %r (provider %r)",
+        str(server_url).rstrip("/"),
+        str(realm),
+        str(client_id),
+        op_name,
+    )
     return KeycloakConnection(
         server_url=str(server_url).rstrip("/"),
         realm=str(realm),

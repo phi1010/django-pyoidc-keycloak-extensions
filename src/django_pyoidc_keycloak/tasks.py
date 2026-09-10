@@ -7,6 +7,7 @@ a bulk synchronisation.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 try:  # pragma: no cover - exercised by whichever environment the project has
@@ -27,10 +28,14 @@ except ImportError:  # pragma: no cover
         return decorator
 
 
+logger = logging.getLogger(__name__)
+
+
 @shared_task(name="keycloak.sync_events")
 def sync_events_task() -> dict[str, int]:
     from django_pyoidc_keycloak.sync.events import poll_events
 
+    logger.debug("Celery task keycloak.sync_events starting")
     return poll_events()
 
 
@@ -38,6 +43,7 @@ def sync_events_task() -> dict[str, int]:
 def reconcile_task(import_all: bool | None = None) -> dict[str, int]:
     from django_pyoidc_keycloak.sync.reconcile import full_reconcile
 
+    logger.debug("Celery task keycloak.reconcile starting (import_all=%s)", import_all)
     return full_reconcile(import_all=import_all)
 
 
@@ -45,6 +51,7 @@ def reconcile_task(import_all: bool | None = None) -> dict[str, int]:
 def sync_user_task(keycloak_id: str) -> str | None:
     from django_pyoidc_keycloak.sync.users import sync_user
 
+    logger.debug("Celery task keycloak.sync_user starting for %s", keycloak_id)
     user = sync_user(keycloak_id=keycloak_id, create=True)
     return str(user.pk) if user else None
 
@@ -56,6 +63,7 @@ def sync_users_task(user_pks: list[str]) -> dict[str, int]:
 
     from django_pyoidc_keycloak.sync.reconcile import sync_users
 
+    logger.debug("Celery task keycloak.sync_users starting for %d user(s)", len(user_pks))
     user_model = get_user_model()
     return sync_users(user_model.objects.filter(pk__in=user_pks))
 
@@ -65,4 +73,5 @@ def purge_tokens_task() -> dict[str, int]:
     from django_pyoidc_keycloak.sync.groups import sweep_expired_memberships
     from django_pyoidc_keycloak.tokens.store import purge_orphans
 
+    logger.debug("Celery task keycloak.purge_tokens starting")
     return {"tokens": purge_orphans(), "memberships": sweep_expired_memberships()}

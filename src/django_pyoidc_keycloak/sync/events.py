@@ -29,6 +29,7 @@ from django_pyoidc_keycloak.admin_api.exceptions import KeycloakUserNotFound
 from django_pyoidc_keycloak.conf import app_settings
 from django_pyoidc_keycloak.models import KeycloakUser
 from django_pyoidc_keycloak.models.sync import SyncCursor, SyncKind
+from django_pyoidc_keycloak.scrub import scrub_exception
 from django_pyoidc_keycloak.sync.runs import record_error, sync_run
 from django_pyoidc_keycloak.sync.users import handle_missing_user, sync_user
 
@@ -80,6 +81,7 @@ def _fetch_all(fetch, *, date_from: str, page_size: int) -> list[dict[str, Any]]
     first = 0
     while True:
         page = fetch(date_from=date_from, first=first, maximum=page_size)
+        logger.debug("Event page from %s at offset %d returned %d event(s)", date_from, first, len(page))
         events.extend(page)
         if len(page) < page_size:
             return events
@@ -96,7 +98,15 @@ def poll_admin_events(*, client=None) -> dict[str, int]:
     with sync_run(SyncKind.EVENTS, realm=realm) as run:
         cursor = _get_cursor(realm, "admin")
         start = _window_start(cursor)
+        logger.debug(
+            "Polling admin events for realm %s from %s (cursor at %s, %ds overlap)",
+            realm,
+            start.isoformat(),
+            cursor.last_event_time.isoformat() if cursor.last_event_time else "never",
+            int(app_settings.EVENT_OVERLAP_SECONDS),
+        )
         events = _fetch_all(client.get_admin_events, date_from=_date_from(start), page_size=page_size)
+        logger.debug("Fetched %d admin event(s) to consider", len(events))
 
         latest = cursor.last_event_time
         processed_fingerprints: list[str] = []
@@ -104,9 +114,12 @@ def poll_admin_events(*, client=None) -> dict[str, int]:
         for event in sorted(events, key=lambda item: item.get("time") or 0):
             moment = _event_time(event)
             if moment and moment < start:
+                logger.debug("Admin event at %s predates the window; ignoring", moment.isoformat())
                 continue
             fingerprint = _fingerprint(event)
             if cursor.has_seen(fingerprint):
+                # The day-granular dateFrom means every poll re-reads a window.
+                logger.debug("Admin event already processed in an earlier poll; skipping")
                 counts["skipped"] += 1
                 continue
 
@@ -124,6 +137,13 @@ def poll_admin_events(*, client=None) -> dict[str, int]:
         cursor.remember(processed_fingerprints)
         cursor.last_event_time = latest or timezone.now()
         cursor.save()
+        logger.info(
+            "Admin event poll for realm %s: %d processed, %d already seen; cursor now at %s",
+            realm,
+            counts["processed"],
+            counts["skipped"],
+            cursor.last_event_time.isoformat(),
+        )
 
     return counts
 
@@ -133,31 +153,44 @@ def _handle_admin_event(event: dict[str, Any], *, client, run) -> None:
     operation = (event.get("operationType") or "").upper()
     path = event.get("resourcePath") or ""
 
+    logger.debug("Admin event: %s %s on %s", operation or "?", resource_type or "?", path or "?")
+
     if resource_type in GROUP_RESOURCE_TYPES:
-        # TODO move imports to the top of the file
         from django_pyoidc_keycloak.sync.groups import sync_groups
 
+        logger.debug("Group event on %s; re-reading the whole group tree", path or "?")
         sync_groups(client=client)
         return
 
     if resource_type not in USER_RESOURCE_TYPES:
+        logger.debug("Resource type %r is not mirrored locally; ignoring", resource_type)
         return
 
     match = _USER_PATH.search(path)
     if not match:
-        # TODO emit a log entry
+        # Keycloak's resourcePath shape varies by version and by resource, and without an id
+        # there is nothing to re-read. Returning silently made that indistinguishable from a
+        # successful no-op.
+        logger.debug(
+            "Admin event of type %s carries no user id in its resourcePath %r; nothing to sync",
+            resource_type,
+            path,
+        )
         return
     keycloak_id = match.group("id")
 
     if operation == "DELETE" and resource_type == "USER" and _is_user_root(path):
+        logger.debug("Admin event deletes user %s at the realm", keycloak_id)
         _delete_local_user(keycloak_id, run=run)
         return
 
     try:
         # Re-read rather than trusting the event payload.
+        logger.debug("Re-reading user %s from the Admin API after a %s event", keycloak_id, resource_type)
         sync_user(keycloak_id=keycloak_id, client=client, create=bool(app_settings.IMPORT_ALL_USERS))
         run.updated += 1
     except KeycloakUserNotFound:
+        logger.debug("User %s was already gone when re-read; removing locally", keycloak_id)
         _delete_local_user(keycloak_id, run=run)
 
 
@@ -169,14 +202,17 @@ def _is_user_root(path: str) -> bool:
 
 def _delete_local_user(keycloak_id: str, *, run) -> None:
     # TODO add django check that ensures that this typing constraint holds with the settings configured.
-    user_model : type[KeycloakUser] = get_user_model()
+    user_model: type[KeycloakUser] = get_user_model()
     try:
         user = user_model.objects.get(keycloak_id=keycloak_id)
     except user_model.DoesNotExist:
-        # TODO emit a log entry
+        # Normal when the account was never imported (IMPORT_ALL_USERS is off), so not a
+        # warning -- but it is the difference between "nothing to do" and a missed import.
+        logger.debug("Keycloak reported a deletion for %s, which has no local row", keycloak_id)
         return
     if user.is_anonymized:
         # Already handled once; replaying the event must not now hard-delete the tombstone.
+        logger.debug("User %s is already an anonymised tombstone; leaving it alone", keycloak_id)
         return
     outcome = handle_missing_user(user)
     if outcome == "deleted":
@@ -199,7 +235,14 @@ def poll_user_events(*, client=None) -> dict[str, int]:
         def fetch(*, date_from: str, first: int, maximum: int):
             return client.get_user_events(date_from=date_from, types=USER_EVENT_TYPES, first=first, maximum=maximum)
 
+        logger.debug(
+            "Polling user events for realm %s from %s (types: %s)",
+            realm,
+            start.isoformat(),
+            ", ".join(USER_EVENT_TYPES),
+        )
         events = _fetch_all(fetch, date_from=_date_from(start), page_size=page_size)
+        logger.debug("Fetched %d user event(s) to consider", len(events))
 
         latest = cursor.last_event_time
         processed_fingerprints: list[str] = []
@@ -214,15 +257,19 @@ def poll_user_events(*, client=None) -> dict[str, int]:
                 continue
 
             keycloak_id = event.get("userId")
-            if keycloak_id:
+            if not keycloak_id:
+                logger.debug("User event of type %r carries no userId; nothing to sync", event.get("type"))
+            else:
+                logger.debug("User event %r for %s; re-reading from the Admin API", event.get("type"), keycloak_id)
                 try:
                     sync_user(keycloak_id=keycloak_id, client=client, create=bool(app_settings.IMPORT_ALL_USERS))
                     run.updated += 1
                     counts["processed"] += 1
                 except KeycloakUserNotFound:
+                    logger.debug("User %s was already gone when re-read; removing locally", keycloak_id)
                     _delete_local_user(str(keycloak_id), run=run)
                 except Exception as exc:
-                    record_error(run, f"User event for {keycloak_id}: {exc}")
+                    record_error(run, f"User event for {keycloak_id}: {scrub_exception(exc)}")
 
             processed_fingerprints.append(fingerprint)
             if moment and (latest is None or moment > latest):
@@ -231,12 +278,20 @@ def poll_user_events(*, client=None) -> dict[str, int]:
         cursor.remember(processed_fingerprints)
         cursor.last_event_time = latest or timezone.now()
         cursor.save()
+        logger.info(
+            "User event poll for realm %s: %d processed, %d already seen; cursor now at %s",
+            realm,
+            counts["processed"],
+            counts["skipped"],
+            cursor.last_event_time.isoformat(),
+        )
 
     return counts
 
 
 def poll_events(*, client=None) -> dict[str, int]:
     """Poll both streams."""
+    logger.debug("Polling both Keycloak event streams")
     admin = poll_admin_events(client=client)
     user = poll_user_events(client=client)
     return {key: admin.get(key, 0) + user.get(key, 0) for key in set(admin) | set(user)}

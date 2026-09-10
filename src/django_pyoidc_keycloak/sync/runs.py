@@ -26,9 +26,11 @@ def sync_run(kind: str, realm: str | None = None) -> Iterator[SyncRun]:
             realm = "?"
 
     run = SyncRun.objects.create(kind=kind, realm=realm)
+    logger.debug("Opened %s synchronisation run %s for realm %s", kind, run.pk, realm)
     try:
         yield run
     except Exception as exc:
+        logger.debug("Synchronisation run %s failed: %s", run.pk, scrub_exception(exc))
         run.status = SyncStatus.FAILED
         run.errors += 1
         run.error_detail = scrub_exception(exc)
@@ -40,6 +42,20 @@ def sync_run(kind: str, realm: str | None = None) -> Iterator[SyncRun]:
         run.status = SyncStatus.FAILED if run.errors else SyncStatus.SUCCESS
         run.finished_at = timezone.now()
         run.save()
+        logger.info(
+            "%s run %s on realm %s finished as %s: %d created, %d updated, %d deleted, "
+            "%d anonymised, %d skipped, %d error(s)",
+            kind,
+            run.pk,
+            realm,
+            run.status,
+            run.created,
+            run.updated,
+            run.deleted,
+            run.anonymized,
+            run.skipped,
+            run.errors,
+        )
         sync_run_finished.send(sender=SyncRun, sync_run=run)
 
 
