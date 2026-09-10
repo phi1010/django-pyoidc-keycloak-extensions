@@ -16,6 +16,7 @@ from django_pyoidc_keycloak.checks import (
 )
 from django_pyoidc_keycloak.models import GroupMembership, KeycloakGroup, KeycloakUser, SyncRun
 from django_pyoidc_keycloak.models.base import MembershipSource
+from tests.testproject.backend import StubPolicyBackend
 
 pytestmark = pytest.mark.django_db
 
@@ -243,15 +244,124 @@ def test_sync_now_refuses_a_get(admin_browser):
     assert response.status_code == 405
 
 
-def test_sync_now_requires_change_permission(client):
-    """Staff alone is not enough: admin_view only proves the caller can open the admin."""
-    from unittest import mock
+# -- the sync verb ------------------------------------------------------
+# Synchronising is its own permission, so a policy can grant it without `change` and grant
+# `change` without it. Every test here goes through the real policy backend, which proves the
+# codename the mixin builds is the one a policy would have to name.
 
-    staff = KeycloakUser.objects.create_user(username="readonly-staff", password="pw", is_staff=True)
+SYNC = "keycloak.sync_keycloakuser"
+CHANGE = "keycloak.change_keycloakuser"
+VIEW = "keycloak.view_keycloakuser"
+
+
+@pytest.fixture
+def staff():
+    return KeycloakUser.objects.create_user(username="staff", password="pw", is_staff=True)
+
+
+def test_the_codename_is_derived_from_the_model():
+    """A project that swaps the user model gets the verb on its own model, not on ours."""
+    user_admin = admin.site._registry[KeycloakUser]
+    request = RequestFactory().get("/")
+    request.user = KeycloakUser(username="nobody", is_superuser=False, is_active=True)
+
+    StubPolicyBackend.policy = {SYNC: {"nobody"}}
+
+    assert user_admin.has_sync_permission(request) is True
+    assert ("has_perm", "nobody", SYNC) in StubPolicyBackend.calls
+
+
+def test_sync_now_is_allowed_by_the_sync_verb_alone(client, staff):
+    """No `change` permission anywhere: sync stands on its own."""
+    StubPolicyBackend.policy = {SYNC: {"staff"}}
+    client.force_login(staff)
+    local = KeycloakUser.objects.create_user(username="local-only")
+
+    response = client.post(f"/admin/keycloak/keycloakuser/{local.pk}/sync/")
+
+    assert response.status_code == 302
+
+
+def test_sync_now_is_refused_to_someone_who_may_only_change(client, staff):
+    """The other direction: editing a row does not entitle you to re-pull it from Keycloak."""
+    StubPolicyBackend.policy = {CHANGE: {"staff"}, VIEW: {"staff"}}
     client.force_login(staff)
     user = KeycloakUser.objects.create_user(username="alice")
 
-    with mock.patch.object(KeycloakUserAdmin, "has_change_permission", return_value=False):
-        response = client.post(f"/admin/keycloak/keycloakuser/{user.pk}/sync/")
+    response = client.post(f"/admin/keycloak/keycloakuser/{user.pk}/sync/")
 
     assert response.status_code == 403
+
+
+def test_sync_now_is_refused_to_staff_with_no_permissions(client, staff):
+    """Staff alone is not enough: admin_view only proves the caller can open the admin."""
+    client.force_login(staff)
+    user = KeycloakUser.objects.create_user(username="alice")
+
+    response = client.post(f"/admin/keycloak/keycloakuser/{user.pk}/sync/")
+
+    assert response.status_code == 403
+
+
+def test_the_sync_actions_are_withheld_without_the_verb(staff):
+    user_admin = admin.site._registry[KeycloakUser]
+    request = RequestFactory().get("/")
+    request.user = staff
+    StubPolicyBackend.policy = {CHANGE: {"staff"}, VIEW: {"staff"}}
+
+    actions = user_admin.get_actions(request)
+
+    assert "action_sync_selected" not in actions
+    assert "action_sync_all" not in actions
+
+
+def test_the_sync_actions_are_offered_with_the_verb(staff):
+    user_admin = admin.site._registry[KeycloakUser]
+    request = RequestFactory().get("/")
+    request.user = staff
+    StubPolicyBackend.policy = {SYNC: {"staff"}, VIEW: {"staff"}}
+
+    actions = user_admin.get_actions(request)
+
+    assert "action_sync_selected" in actions
+    assert "action_sync_all" in actions
+
+
+def test_a_forged_sync_action_does_not_run_without_the_verb(client, staff, monkeypatch):
+    """Django drops an unpermitted action from the form rather than raising, so assert on
+    the effect: the synchronisation must not happen."""
+    calls = []
+    monkeypatch.setattr(KeycloakUserAdmin, "_run_sync", lambda self, *a, **kw: calls.append(a))
+    StubPolicyBackend.policy = {CHANGE: {"staff"}, VIEW: {"staff"}}
+    client.force_login(staff)
+    user = KeycloakUser.objects.create_user(username="alice")
+
+    client.post(
+        "/admin/keycloak/keycloakuser/",
+        {"action": "action_sync_selected", "_selected_action": [str(user.pk)]},
+    )
+
+    assert calls == []
+
+
+def test_the_sync_button_is_hidden_without_the_verb(client, staff):
+    """Offering a button that can only 403 is worse than not offering it."""
+    StubPolicyBackend.policy = {CHANGE: {"staff"}, VIEW: {"staff"}}
+    client.force_login(staff)
+    user = KeycloakUser.objects.create_user(username="alice")
+
+    response = client.get(f"/admin/keycloak/keycloakuser/{user.pk}/change/")
+
+    assert response.status_code == 200
+    assert b"Sync now from Keycloak" not in response.content
+
+
+def test_the_sync_button_is_shown_with_the_verb(client, staff):
+    StubPolicyBackend.policy = {SYNC: {"staff"}, CHANGE: {"staff"}, VIEW: {"staff"}}
+    client.force_login(staff)
+    user = KeycloakUser.objects.create_user(username="alice")
+
+    response = client.get(f"/admin/keycloak/keycloakuser/{user.pk}/change/")
+
+    assert response.status_code == 200
+    assert b"Sync now from Keycloak" in response.content

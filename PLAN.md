@@ -245,6 +245,16 @@ invisible.
   so native groups vanish from the admin entirely.
 - No admin UI anywhere exposes permission selection.
 
+The admin adds one verb of its own, `sync` (`<app_label>.sync_<model_name>`, derived per model
+by `SyncPermissionMixin` so a swapped user model gets the verb on itself). It gates the "Sync
+now" button, `sync_single_view`, and both changelist actions, and is deliberately independent
+of `change`: synchronisation pulls from the realm and may delete or anonymise the local row, so
+a policy has reason to grant either verb without the other. Custom admin actions are *not*
+permission-checked by default -- only `delete_selected` is -- so the actions declare
+`permissions=["sync"]`, which makes Django withhold them from the dropdown. No `Permission` row
+is declared for it: `Meta.permissions` on an abstract model cannot parameterise the codename by
+subclass, so a project with a swapped model would get a row naming the wrong one.
+
 The README states plainly that two empty legacy tables remain as an artifact of `contrib.auth`'s
 migrations, and that they are never read or written by this library.
 

@@ -115,6 +115,27 @@ gates admin access.
 and silently falls back to `AnonymousUser` on every request.  You may subclass it; the
 library discovers it by type.
 
+### Permissions your policy will be asked about
+
+All of the form `<app_label>.<verb>_<model_name>`, so a swapped model changes both halves:
+
+| Verb | Example | Meaning |
+| --- | --- | --- |
+| `view` / `add` / `change` / `delete` | `keycloak.change_keycloakuser` | Django's four, unchanged. |
+| `sync` | `keycloak.sync_keycloakuser` | Pull this record from Keycloak now. |
+
+`sync` is this library's own verb, and it is **independent of `change`** in both directions.
+It gates the "Sync now" button on the user page and the two bulk actions on the changelist.
+Synchronising is neither reading nor editing: it pulls the record from the realm and, when
+the account has gone, deletes or anonymises it locally.  So a policy can grant `sync`
+without `change` -- an operator who may repair drift but not hand-edit fields -- or `change`
+without `sync`, for someone who administers local-only accounts but must not trigger Admin
+API traffic.  Without the verb the button is not rendered and the actions do not appear in
+the changelist dropdown.
+
+No `Permission` row is created for `sync` (none is created for anything -- see
+`CREATE_DJANGO_PERMISSIONS`); the string is simply what your backend is asked about.
+
 ## Scheduling
 
 ```cron

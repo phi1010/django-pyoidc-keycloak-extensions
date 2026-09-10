@@ -73,6 +73,27 @@ class ManagedFilter(admin.SimpleListFilter):
         return queryset
 
 
+class SyncPermissionMixin:
+    """Adds a per-model ``sync`` verb, independent of Django's four.
+
+    Synchronising is neither reading nor editing: it pulls the record from Keycloak and, when
+    the account has gone, deletes or anonymises it locally.  Gating it on ``change`` would
+    conflate "may correct this row by hand" with "may re-pull it from the realm", and a policy
+    has good reason to grant either without the other -- an operator who may repair drift but
+    not edit fields, or an administrator who may edit local-only accounts but must not trigger
+    Admin API traffic.
+
+    The codename is derived per model, so a project that swaps the user model gets the verb on
+    *its* model: ``<app_label>.sync_<model_name>``, for example ``keycloak.sync_keycloakuser``.
+    """
+
+    opts: Any
+
+    def has_sync_permission(self, request: HttpRequest, obj: Any = None) -> bool:
+        """Django's action machinery calls this with the request alone, as it does for delete."""
+        return request.user.has_perm(f"{self.opts.app_label}.sync_{self.opts.model_name}")
+
+
 class GroupMembershipInline(admin.TabularInline):
     """Memberships on the user page. Keycloak-sourced rows cannot be edited here."""
 
@@ -88,7 +109,7 @@ class GroupMembershipInline(admin.TabularInline):
 
 
 @admin.register(KeycloakUser)
-class KeycloakUserAdmin(admin.ModelAdmin):
+class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
     list_display = ("username", "email", "is_active", "is_staff", "is_superuser", "managed", "last_synced_at")
     list_filter = (ManagedFilter, "is_active", "is_staff", "is_superuser", "is_anonymized")
     search_fields = ("username", "email", "first_name", "last_name", "keycloak_id")
@@ -165,8 +186,10 @@ class KeycloakUserAdmin(admin.ModelAdmin):
         the caller is staff, and this view changes state -- on a 404 from Keycloak it deletes
         or anonymises the account.  As a GET link it would also have been reachable by CSRF,
         since Django does not protect GET.
+
+        The verb is ``sync``, not ``change``: see :class:`SyncPermissionMixin`.
         """
-        if not self.has_change_permission(request):
+        if not self.has_sync_permission(request):
             raise PermissionDenied
 
         user = self.get_object(request, object_id)
@@ -211,17 +234,20 @@ class KeycloakUserAdmin(admin.ModelAdmin):
 
     def change_view(self, request: HttpRequest, object_id: str, form_url: str = "", extra_context: Any = None) -> Any:
         extra_context = extra_context or {}
-        extra_context["keycloak_sync_url"] = reverse("admin:keycloak_keycloakuser_sync", args=[object_id])
+        if self.has_sync_permission(request):
+            # The template guards on this being present, so a user without the verb is not
+            # shown a button that would only 403.
+            extra_context["keycloak_sync_url"] = reverse("admin:keycloak_keycloakuser_sync", args=[object_id])
         return super().change_view(request, object_id, form_url, extra_context)
 
-    @admin.action(description=_("Synchronise selected users from Keycloak"))
+    # ``permissions`` is what makes Django check: without it a custom action runs for any
+    # staff user who can open the changelist, since only delete_selected is gated by default.
+    @admin.action(description=_("Synchronise selected users from Keycloak"), permissions=["sync"])
     def action_sync_selected(self, request: HttpRequest, queryset: Any) -> None:
-        # TODO does this check permissions?
         self._run_sync(request, queryset)
 
-    @admin.action(description=_("Synchronise ALL users from Keycloak"))
+    @admin.action(description=_("Synchronise ALL users from Keycloak"), permissions=["sync"])
     def action_sync_all(self, request: HttpRequest, queryset: Any) -> None:
-        # TODO does this check permissions?
         self._run_sync(request, self.model.objects.filter(keycloak_id__isnull=False), all_users=True)
 
     def _run_sync(self, request: HttpRequest, queryset: Any, *, all_users: bool = False) -> None:
