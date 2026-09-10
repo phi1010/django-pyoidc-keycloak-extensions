@@ -48,7 +48,6 @@ class SyncRun(models.Model):
         verbose_name_plural = _("synchronisation runs")
 
     def __str__(self) -> str:
-        # TODO reference to missing method, to be fixed.
         return f"{self.get_kind_display()} on {self.realm} at {self.started_at:%Y-%m-%d %H:%M:%S}"
 
     @property
