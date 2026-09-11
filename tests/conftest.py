@@ -101,19 +101,21 @@ if _container is not None:
 
     atexit.register(lambda: _container.stop())  # pragma: no cover - process teardown
 
-# tests.testproject.settings is imported by Django exactly once; patch it before that
-# happens so the cache points at our container (or at locmem when there is none).
-from tests.testproject import settings as test_settings  # noqa: E402
+# pytest-django has already loaded tests.testproject.settings by the time this conftest is
+# imported (it touches settings in pytest_load_initial_conftests), so patching the module
+# would be silently ignored and the suite would hit the default redis://127.0.0.1:6379.
+# Patch the live settings object instead; the cache handler reads CACHES lazily on first use.
+from django.conf import settings as django_settings  # noqa: E402
 
 if _redis_url:
-    test_settings.CACHES = {
+    django_settings.CACHES = {
         "default": {
             "BACKEND": "django_redis.cache.RedisCache",
             "LOCATION": _redis_url,
         }
     }
 else:
-    test_settings.CACHES = {
+    django_settings.CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         }

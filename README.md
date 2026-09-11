@@ -18,12 +18,19 @@ needs when Keycloak is the system of record:
 
 ## Requirements
 
-Python 3.14+, Django 5.2+, django-pyoidc 1.0.13+, Keycloak 26.2+ for token exchange.
+* Python 3.14+, Django 5.2+, django-pyoidc 1.0.13+
+* Keycloak 26.2+ for token exchange
+* **A Redis server** as Django's default cache. The token-refresh lock needs it (see
+  [Using the tokens](#using-the-tokens)), and no other cache backend will do.
+  django-redis and redis-py are installed as dependencies; you run the Redis server yourself.
+* **Celery 5.4+ (optional)**, installed through the `celery` extra. Without it, sync runs
+  from cron and the admin's bulk actions run inline (see [Scheduling](#scheduling)).
 
 ## Installation
 
 ```bash
-uv pip install django-pyoidc-keycloak-extensions
+uv pip install django-pyoidc-keycloak-extensions            # core, needs Redis
+uv pip install "django-pyoidc-keycloak-extensions[celery]"  # also installs Celery tasks
 ```
 
 ## Keycloak setup
@@ -68,6 +75,15 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 SALT_KEY = env("SALT_KEY")  # token encryption; see "Token encryption" below
+
+# Must be django-redis: token refresh locks through it (system check keycloak.E008).
+# Use a trusted, access-controlled Redis; see "Security notes".
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": env("REDIS_URL"),  # e.g. "redis://redis:6379/0"
+    }
+}
 
 DJANGO_PYOIDC = {
     "sso": {
@@ -280,6 +296,10 @@ uv run pytest -m integration   # against a real Keycloak in Podman
 The integration suite starts `quay.io/keycloak/keycloak:26.4` through Podman's socket, imports
 a realm, and drives the full cycle: reconcile, mutate, poll, delete, refresh, exchange. It
 skips itself if Podman is not installed.
+
+The unit suite starts its own throwaway `redis:7-alpine` container through the same Podman
+socket and points the cache at it. You do not need a Redis running locally. Without Podman
+it falls back to a local-memory cache and skips the tests marked `redis`.
 
 ## Releasing
 

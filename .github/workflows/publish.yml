@@ -39,6 +39,21 @@ jobs:
       - name: Ruff (format)
         run: uv run ruff format --check src tests
 
+      # Without the socket the unit suite falls back to locmem and skips the real-lock
+      # tests; a release must run them.
+      - name: Start the Podman API socket
+        run: |
+          systemctl --user enable --now podman.socket || \
+            podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          for _ in $(seq 1 30); do
+            [ -S "${XDG_RUNTIME_DIR}/podman/podman.sock" ] && break
+            sleep 1
+          done
+          ls -l "${XDG_RUNTIME_DIR}/podman/podman.sock"
+
+      - name: Pre-pull Redis
+        run: podman pull docker.io/library/redis:7-alpine
+
       - name: Unit tests
         run: uv run pytest -q
 
