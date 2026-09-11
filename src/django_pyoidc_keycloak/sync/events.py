@@ -126,7 +126,7 @@ def poll_admin_events(*, client=None) -> dict[str, int]:
             try:
                 _handle_admin_event(event, client=client, run=run)
             except Exception as exc:
-                record_error(run, f"Admin event {event.get('resourcePath')}: {exc}")
+                record_error(run, f"Admin event {event.get('resourcePath')}: {scrub_exception(exc)}")
             else:
                 counts["processed"] += 1
 

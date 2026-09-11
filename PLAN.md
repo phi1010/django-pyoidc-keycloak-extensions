@@ -83,10 +83,12 @@ can trip reuse detection, killing the session. Instead: refresh lazily when a to
 needed and near expiry, and offer `offline_access` (exempt from SSO Session Max) as the opt-in
 mechanism for genuinely away-from-keyboard work.
 
-**Concurrency control is a cache mutex, not `select_for_update`.** Under ASGI a row lock would pin
-a DB transaction open across the HTTP round-trip to Keycloak. `cache.add()` is an atomic
-test-and-set that works identically in sync and async contexts, and Django 5.2's `cache.aadd()` /
-async ORM methods give a genuinely async path.
+**Concurrency control is a distributed lock, not `select_for_update`.** Under ASGI a row lock would pin
+a DB transaction open across the HTTP round-trip to Keycloak. The lock is django-redis's
+`cache.client.lock()` — redis-py's `Lock` underneath: `SET NX PX` to acquire, a token-checked
+Lua script to release, so an expired lock's owner cannot release its successor (finding 3 of
+`SECURITY_REVIEW.md`). That makes django-redis a mandatory dependency and
+`CACHES["default"]` must be `django_redis.cache.RedisCache` (system check `keycloak.E008`).
 
 ---
 

@@ -11,8 +11,10 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 import respx
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.test import override_settings
 from django_pyoidc.models import OIDCSession
 
 from django_pyoidc_keycloak.models import SyncRun
@@ -71,19 +73,23 @@ def test_a_failing_run_records_a_scrubbed_message():
 
 @respx.mock
 def test_no_cached_value_holds_a_token_after_a_full_cycle(caplog):
-    """Login, store, refresh and exchange -- then inspect every cache write."""
-    written: dict[str, object] = {}
-    original_add, original_set = cache.add, cache.set
+    """Login, store, refresh and exchange -- then inspect every Redis write.
 
-    def spy_add(key, value, timeout=None, **kwargs):
+    The refresh lock writes through redis-py's own ``SET`` (django-redis's ``lock()``
+    hands out a redis-py ``Lock``), so the spy hooks the underlying client rather than
+    the Django cache API.
+    """
+    import redis
+
+    written: dict[bytes | str, bytes | str] = {}
+    redis_client = cache.client.get_client(write=True)
+    original_set = redis_client.set
+
+    def spy_set(key, value, **kwargs):
         written[key] = value
-        return original_add(key, value, timeout, **kwargs)
+        return original_set(key, value, **kwargs)
 
-    def spy_set(key, value, timeout=None, **kwargs):
-        written[key] = value
-        return original_set(key, value, timeout, **kwargs)
-
-    cache.add, cache.set = spy_add, spy_set
+    redis_client.set = spy_set
     try:
         user = get_user_model().objects.create_user(username="alice")
         session = OIDCSession.objects.create(state="s", sub="1", cache_session_key="k", session_state="ss")
@@ -105,15 +111,18 @@ def test_no_cached_value_holds_a_token_after_a_full_cycle(caplog):
             from django_pyoidc_keycloak.tokens.exchange import exchange_access_token
 
             respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": JWT}))
-            exchange_access_token(JWT, audience="reports")
+            with override_settings(KEYCLOAK={**settings.KEYCLOAK, "TOKEN_EXCHANGE_ENABLED": True}):
+                exchange_access_token(JWT, audience="reports")
     finally:
-        cache.add, cache.set = original_add, original_set
+        redis_client.set = original_set
 
     assert written, "nothing was cached at all -- the test is not exercising the path"
     for key, value in written.items():
-        assert "eyJ" not in str(value), f"a JWT reached the cache under {key!r}"
-        assert "refresh-token" not in str(value), f"a refresh token reached the cache under {key!r}"
+        assert "eyJ" not in str(value), f"a JWT reached Redis under {key!r}"
+        assert "refresh-token" not in str(value), f"a refresh token reached Redis under {key!r}"
 
     for record in caplog.records:
         assert "eyJ" not in record.getMessage()
         assert "refresh-token" not in record.getMessage()
+
+    assert isinstance(redis_client, redis.Redis)  # the spy really was on the redis client

@@ -166,6 +166,43 @@ def test_a_failing_event_is_recorded_without_stopping_the_poll(client_stub):
     assert "Keycloak said no" in run.error_detail
 
 
+def test_a_failing_admin_event_is_scrubbed_at_the_source(client_stub, monkeypatch):
+    """Finding 1: every other call site passes a scrubbed message to record_error; the
+    admin-event handler interpolated the raw exception and leaned on the sink's scrub.
+
+    This spies on the message itself: with the fix it arrives already redacted, so the
+    guarantee no longer depends on record_error scrubbing last."""
+    from django_pyoidc_keycloak.sync import events as events_module
+    from django_pyoidc_keycloak.sync import runs as runs_module
+
+    received: list[str] = []
+    real_record_error = runs_module.record_error
+
+    def spy(run, message):
+        received.append(message)
+        return real_record_error(run, message)
+
+    monkeypatch.setattr(events_module, "record_error", spy)
+
+    opaque = "A" * 48  # long enough for scrub_text's opaque-token pattern to catch
+    client_stub.get_user.side_effect = RuntimeError(f"Keycloak said no to {opaque}")
+    client_stub.get_admin_events.side_effect = [
+        [admin_event(resourcePath=f"users/{uuid.uuid4()}")],
+        [],
+    ]
+
+    poll_admin_events(client=client_stub)
+
+    assert received, "the failing event never reached record_error"
+    for message in received:
+        assert opaque not in message, "the raw exception reached record_error unscrubbed"
+        assert "[redacted]" in message
+
+    run = SyncRun.objects.get()
+    assert run.errors == 1
+    assert opaque not in run.error_detail
+
+
 def test_account_console_edits_come_from_the_user_event_stream(client_stub):
     """Self-service profile edits produce no admin event at all."""
     representation = kc_user()

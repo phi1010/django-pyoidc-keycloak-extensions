@@ -10,6 +10,7 @@ from django.test import RequestFactory
 from django_pyoidc_keycloak.admin import KeycloakUserAdmin
 from django_pyoidc_keycloak.checks import (
     check_authentication_backends,
+    check_cache_backend,
     check_encryption_key,
     check_token_exchange,
     check_user_model,
@@ -97,6 +98,33 @@ def test_token_exchange_needs_a_confidential_client(settings):
     ids = [problem.id for problem in check_token_exchange(None)]
 
     assert ids  # either "no secret" or "cannot build the connection"
+
+
+def test_the_cache_backend_must_be_django_redis(settings):
+    """Finding 3's follow-on: the refresh mutex releases through a token-checked Lua
+    script, which only django-redis's lock provides."""
+    settings.CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+    ids = [problem.id for problem in check_cache_backend(None)]
+
+    assert "keycloak.E008" in ids
+
+
+def test_a_non_default_cache_backend_is_not_the_concern(settings):
+    """Only the cache the refresh path actually uses is checked."""
+    settings.CACHES = {
+        "default": {"BACKEND": "django_redis.cache.RedisCache", "LOCATION": "redis://127.0.0.1:6379"},
+        "other": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+    }
+
+    assert check_cache_backend(None) == []
+
+
+def test_no_cache_check_when_tokens_are_not_stored(settings):
+    settings.KEYCLOAK = {**settings.KEYCLOAK, "STORE_TOKENS": False}
+    settings.CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+    assert check_cache_backend(None) == []
 
 
 # -- admin --------------------------------------------------------------

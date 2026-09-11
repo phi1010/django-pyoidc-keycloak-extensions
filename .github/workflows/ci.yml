@@ -53,6 +53,21 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev --extra celery
 
+      # The unit suite starts a throwaway Redis through testcontainers (Podman) for the
+      # token-refresh lock tests; the socket has to be up before pytest runs.
+      - name: Start the Podman API socket
+        run: |
+          systemctl --user enable --now podman.socket || \
+            podman system service --time=0 "unix://${XDG_RUNTIME_DIR}/podman/podman.sock" &
+          for _ in $(seq 1 30); do
+            [ -S "${XDG_RUNTIME_DIR}/podman/podman.sock" ] && break
+            sleep 1
+          done
+          ls -l "${XDG_RUNTIME_DIR}/podman/podman.sock"
+
+      - name: Pre-pull Redis
+        run: podman pull docker.io/library/redis:7-alpine
+
       - name: Unit tests
         run: uv run pytest -q
 

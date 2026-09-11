@@ -124,7 +124,13 @@ def keycloak_settings(keycloak: str, settings):
             "keycloak_realm": REALM,
         }
     }
-    settings.KEYCLOAK = {**settings.KEYCLOAK, "SERVER_URL": keycloak, "REALM": REALM}
+    settings.KEYCLOAK = {
+        **settings.KEYCLOAK,
+        "SERVER_URL": keycloak,
+        "REALM": REALM,
+        # The integration suite exercises the enabled end of the exchange gate.
+        "TOKEN_EXCHANGE_ENABLED": True,
+    }
 
     from django_pyoidc_keycloak.admin_api.client import reset_admin_client
 

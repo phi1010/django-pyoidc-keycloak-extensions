@@ -202,10 +202,17 @@ downstream = exchange_token(request.user, audience="reports-api")
 ```
 
 Refresh is lazy and on demand, never scheduled: refreshing on a timer resets Keycloak's SSO
-Session Idle clock (defeating idle timeout), is still capped by SSO Session Max, and races the
-user's own browser refresh, which trips reuse detection when rotation is on. For work while
+Session Idle clock (defeating idle timeout), is still capped by SSO Session Max, and races
+the user's own browser refresh, which trips reuse detection when rotation is on. For work while
 the user is away, set `KEYCLOAK["REQUEST_OFFLINE_ACCESS"] = True` to obtain an offline token,
 which is exempt from SSO Session Max.
+
+Concurrent refreshes are serialised by a distributed lock served through
+[django-redis](https://github.com/jazzband/django-redis) — redis-py's `Lock`, acquired with
+`SET NX PX` and released by a token-checked Lua script, so a worker whose lock expired can
+never release the next worker's. This is why django-redis is a mandatory dependency and
+`CACHES["default"]` must point at `django_redis.cache.RedisCache`; a system check
+(`keycloak.E008`) enforces it at start-up.
 
 ## Settings
 
@@ -222,7 +229,7 @@ which is exempt from SSO Session Max.
 | `CREATE_DJANGO_PERMISSIONS` | `False` | Let Django populate `auth_permission` again. |
 | `STORE_TOKENS` | `True` | Store raw tokens at login. |
 | `REQUEST_OFFLINE_ACCESS` | `False` | Request `offline_access` scope. |
-| `TOKEN_EXCHANGE_ENABLED` | `False` | Enables the token-exchange system check. |
+| `TOKEN_EXCHANGE_ENABLED` | `False` | Enables token exchange; the call refuses while off. |
 | `ADMIN_BULK_INLINE_LIMIT` | `50` | Cap on synchronising inline from the admin without Celery. |
 | `EVENT_OVERLAP_SECONDS` | `300` | How far back each event poll re-reads. |
 

@@ -41,6 +41,15 @@ def exchange_access_token(
     scope: str | None = None,
 ) -> str:
     """Exchange one access token for another aimed at ``audience``."""
+    if not app_settings.TOKEN_EXCHANGE_ENABLED:
+        # Gated here as well as by the system check, so a disabled exchange cannot be
+        # reached through a code path the check does not cover (a shell, celery, a test).
+        msg = (
+            "Token exchange is disabled. Set KEYCLOAK['TOKEN_EXCHANGE_ENABLED'] = True to "
+            "enable RFC 8693 token exchange for this deployment."
+        )
+        raise TokensUnavailable(msg)
+
     connection = get_connection()
     data = {
         "grant_type": GRANT_TYPE,

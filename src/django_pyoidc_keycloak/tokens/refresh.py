@@ -6,16 +6,23 @@ Session Max, and races the user's own browser refresh, which trips refresh-token
 detection when rotation is enabled.  Tokens are refreshed here only when something actually
 needs one.
 
-Concurrency uses a cache mutex rather than ``select_for_update``: a row lock would hold a
-database transaction open across the HTTP round-trip to Keycloak, which is exactly what you
-do not want under ASGI.  The cached value is a random lock nonce -- never a token.
+Concurrency uses a distributed Redis lock rather than ``select_for_update``: a row lock would
+hold a database transaction open across the HTTP round-trip to Keycloak, which is exactly what
+you do not want under ASGI.  The lock is django-redis's ``cache.client.lock()``, which is
+redis-py's ``Lock`` underneath: acquisition is a single ``SET NX PX``, and release is a Lua
+script that only deletes the key when it still carries the acquirer's own random token --
+so a worker whose lock has expired cannot release the lock of whoever acquired it next.
+
+Finding 3 of SECURITY_REVIEW.md: the previous implementation released with
+``cache.get() == nonce`` followed by ``cache.delete()``, a non-atomic pair that raced with
+lock expiry and could delete another worker's lock.  redis-py's token-checked release closes
+that window.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -38,6 +45,27 @@ LOCK_WAIT_TOTAL = 10.0
 
 def _lock_key(token_set: Any) -> str:
     return f"keycloak:refresh:{token_set.pk}"
+
+
+def _get_lock(key: str):
+    """The django-redis lock for ``key``, from whichever cache is configured.
+
+    ``cache.client`` is django-redis's client; its ``lock()`` returns redis-py's ``Lock``
+    bound to a Redis connection.  The token redis-py stores *is* the nonce: a random
+    UUID generated per acquisition, never a credential.
+    """
+
+    # django-stubs does not know django-redis attaches its own client to the cache.
+    client = cache.client  # type: ignore[attr-defined] # noqa: TC001
+    return client.lock(
+        key,
+        timeout=LOCK_TIMEOUT,
+        sleep=LOCK_POLL_INTERVAL,
+        # Never block in acquire(): the waiting path below polls the database instead,
+        # which is what lets a caller pick up the other worker's result without holding
+        # a connection open.
+        blocking=False,
+    )
 
 
 def _expiry(seconds: Any) -> datetime | None:
@@ -104,6 +132,24 @@ def _perform_refresh(token_set: Any) -> Any:
     return token_set
 
 
+def _release(lock: Any) -> None:
+    """Release the lock, tolerating expiry.
+
+    redis-py raises ``LockNotOwnedError`` when the lock is no longer ours -- the timeout
+    elapsed and another worker acquired it.  That is a warning, not an error: the refresh
+    still happened; the next worker simply runs its own.
+    """
+    from redis.exceptions import LockError
+
+    try:
+        lock.release()
+    except LockError:
+        logger.warning(
+            "The refresh lock for this token set expired before the refresh finished; "
+            "another worker may have refreshed concurrently."
+        )
+
+
 def get_valid_access_token(token_set: Any, *, leeway: int | None = None) -> str:
     """Return a usable access token, refreshing first if it is about to expire."""
     if token_set is None:
@@ -120,10 +166,8 @@ def get_valid_access_token(token_set: Any, *, leeway: int | None = None) -> str:
         msg = "The access token has expired and no refresh token was stored for this session."
         raise TokensUnavailable(msg)
 
-    key = _lock_key(token_set)
-    nonce = secrets.token_hex(16)
-
-    if cache.add(key, nonce, LOCK_TIMEOUT):
+    lock = _get_lock(_lock_key(token_set))
+    if lock.acquire():
         logger.debug("Took the refresh lock for token set %s", token_set.pk)
         try:
             token_set.refresh_from_db()
@@ -134,10 +178,8 @@ def get_valid_access_token(token_set: Any, *, leeway: int | None = None) -> str:
             _perform_refresh(token_set)
             return token_set.access_token
         finally:
-            # Only release our own lock, never someone else's.
-            if cache.get(key) == nonce:
-                cache.delete(key)
-                logger.debug("Released the refresh lock for token set %s", token_set.pk)
+            # Token-checked by a Lua script: a slow worker cannot release the next one's lock.
+            _release(lock)
 
     return _await_other_refresh(token_set, leeway=leeway)
 
@@ -175,10 +217,8 @@ async def aget_valid_access_token(token_set: Any, *, leeway: int | None = None) 
         msg = "The access token has expired and no refresh token was stored for this session."
         raise TokensUnavailable(msg)
 
-    key = _lock_key(token_set)
-    nonce = secrets.token_hex(16)
-
-    if await cache.aadd(key, nonce, LOCK_TIMEOUT):
+    lock = _get_lock(_lock_key(token_set))
+    if await sync_to_async(lock.acquire)():
         logger.debug("Took the refresh lock for token set %s", token_set.pk)
         try:
             await sync_to_async(token_set.refresh_from_db)()
@@ -188,9 +228,7 @@ async def aget_valid_access_token(token_set: Any, *, leeway: int | None = None) 
             await sync_to_async(_perform_refresh)(token_set)
             return token_set.access_token
         finally:
-            if await cache.aget(key) == nonce:
-                await cache.adelete(key)
-                logger.debug("Released the refresh lock for token set %s", token_set.pk)
+            await sync_to_async(_release)(lock)
 
     logger.debug("Another worker is refreshing token set %s; waiting up to %.1fs", token_set.pk, LOCK_WAIT_TOTAL)
     deadline = time.monotonic() + LOCK_WAIT_TOTAL

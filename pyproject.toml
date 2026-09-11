@@ -31,6 +31,13 @@ dependencies = [
     # Used to parse and normalise Admin API URLs before they are requested; httpx brings
     # httpcore rather than urllib3, so it is declared here in its own right.
     "urllib3>=2",
+    # The token-refresh mutex is a redis-py Lock served through django-redis's cache client:
+    # acquisition is SET NX PX and release is a token-checked Lua script, which the previous
+    # cache.get()/cache.delete() pair raced (see SECURITY_REVIEW.md, finding 3). Mandatory
+    # because the refresh path cannot fall back to a non-atomic lock. redis-py is imported
+    # directly (redis.exceptions.LockError), so it is declared in its own right.
+    "django-redis>=5.4",
+    "redis>=5",
 ]
 
 [project.optional-dependencies]
@@ -82,7 +89,7 @@ filterwarnings = [
     "default::DeprecationWarning:oic.*",
     "default::DeprecationWarning:.*oic\\.utils\\.time_util.*",
 ]
-markers = ["integration: needs a real Keycloak container (Podman)"]
+markers = ["integration: needs a real Keycloak container (Podman)", "redis: needs a real Redis container (Podman)"]
 # Integration tests are opt-in: run them with `pytest -m integration`.
 addopts = "-m 'not integration'"
 

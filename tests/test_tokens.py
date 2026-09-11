@@ -216,15 +216,14 @@ def test_without_a_refresh_token_the_caller_is_told(user, session):
 
 def test_a_held_lock_stops_a_second_caller_from_refreshing(token_set):
     """The mutex is what keeps two workers from both hitting Keycloak."""
-    from django.core.cache import cache
-
-    from django_pyoidc_keycloak.tokens.refresh import _lock_key
+    from django_pyoidc_keycloak.tokens.refresh import _get_lock, _lock_key
 
     token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
     token_set.save()
 
     # Pretend another worker got there first and is mid-refresh.
-    cache.add(_lock_key(token_set), "someone-elses-nonce", 30)
+    others_lock = _get_lock(_lock_key(token_set))
+    assert others_lock.acquire() is True
 
     # That worker finishes and writes the new token.
     OIDCTokenSet.objects.filter(pk=token_set.pk).update(
@@ -237,21 +236,27 @@ def test_a_held_lock_stops_a_second_caller_from_refreshing(token_set):
         assert get_valid_access_token(token_set) == "new-token"
         assert route.call_count == 0, "the loser of the race must not refresh as well"
 
+    others_lock.release()
+
 
 def test_waiting_for_another_worker_eventually_gives_up(token_set, monkeypatch):
     """A worker that crashed mid-refresh must not hang the request forever."""
-    from django.core.cache import cache
-
     from django_pyoidc_keycloak.tokens import refresh as refresh_module
+    from django_pyoidc_keycloak.tokens.refresh import _get_lock, _lock_key
 
     monkeypatch.setattr(refresh_module, "LOCK_WAIT_TOTAL", 0.3)
     monkeypatch.setattr(refresh_module, "LOCK_POLL_INTERVAL", 0.05)
     token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
     token_set.save()
-    cache.add(refresh_module._lock_key(token_set), "someone-elses-nonce", 30)
 
-    with pytest.raises(TokensUnavailable, match="Timed out"):
-        get_valid_access_token(token_set)
+    others_lock = _get_lock(_lock_key(token_set))
+    assert others_lock.acquire() is True
+
+    try:
+        with pytest.raises(TokensUnavailable, match="Timed out"):
+            get_valid_access_token(token_set)
+    finally:
+        others_lock.release()
 
 
 @respx.mock
@@ -271,7 +276,8 @@ def test_the_lock_is_released_once_the_refresh_is_done(token_set):
 
 @respx.mock
 def test_a_caller_never_releases_someone_elses_lock(token_set):
-    """Releasing by nonce, so a slow worker cannot unlock the next one's refresh."""
+    """redis-py's release only deletes the key when it still carries our own token, so a
+    slow worker whose lock expired cannot unlock the next one's refresh."""
     from django.core.cache import cache
 
     from django_pyoidc_keycloak.tokens.refresh import _lock_key
@@ -280,49 +286,110 @@ def test_a_caller_never_releases_someone_elses_lock(token_set):
     token_set.save()
 
     def steal_the_lock(request):
-        cache.set(_lock_key(token_set), "a-newer-nonce", 30)
+        # The refresh outlived LOCK_TIMEOUT: the key expired and another worker took it.
+        cache.set(_lock_key(token_set), "a-newer-token", None)
         return httpx.Response(200, json={"access_token": "new-token", "expires_in": 300})
 
     respx.post(TOKEN_URL).mock(side_effect=steal_the_lock)
 
     get_valid_access_token(token_set)
 
-    assert cache.get(_lock_key(token_set)) == "a-newer-nonce"
+    assert cache.get(_lock_key(token_set)) == "a-newer-token"
 
 
-def test_the_mutex_stores_a_nonce_and_never_a_token(token_set, monkeypatch):
-    """Whatever ends up in the cache must not be a credential."""
+def _raw_lock_value(key: str) -> str | None:
+    """The lock's stored token, read past django-redis's serializer.
+
+    redis-py stores a plain hex string, not a pickled value, so it can only be read
+    through the raw client -- under the prefixed key django-redis itself would use.
+    """
     from django.core.cache import cache
 
-    written: dict[str, object] = {}
-    original_add = cache.add
+    raw = cache.client.get_client(write=True).get(cache.client.make_key(key))
+    return raw.decode() if isinstance(raw, bytes) else raw
 
-    def spy_add(key, value, timeout=None, **kwargs):
-        written[key] = value
-        return original_add(key, value, timeout, **kwargs)
 
-    monkeypatch.setattr(cache, "add", spy_add)
+def test_the_mutex_stores_a_nonce_and_never_a_token(token_set):
+    """Whatever ends up in Redis under the lock key must not be a credential.
+
+    redis-py's lock stores a random UUID token; the test reads the stored value while
+    the lock is held, to prove no JWT or refresh token snuck in.
+    """
+    from django_pyoidc_keycloak.tokens.refresh import _get_lock, _lock_key
+
     token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
     token_set.save()
 
-    with respx.mock:
-        respx.post(TOKEN_URL).mock(
-            return_value=httpx.Response(200, json={"access_token": "new-token", "expires_in": 300})
-        )
-        get_valid_access_token(token_set)
+    lock = _get_lock(_lock_key(token_set))
+    assert lock.acquire() is True
+    try:
+        value = _raw_lock_value(_lock_key(token_set))
+    finally:
+        lock.release()
 
-    assert written, "the lock was never taken"
-    for value in written.values():
-        assert "eyJ" not in str(value)
-        assert "refresh-token" not in str(value)
-        assert "new-token" not in str(value)
+    assert value, "the lock was never taken"
+    assert value not in {JWT, "refresh-token", "new-token", str(token_set.pk), str(token_set.id)}
+    assert "eyJ" not in value
+
+
+@pytest.mark.redis
+def test_lock_release_is_atomic_across_expiry(token_set):
+    """Finding 3's regression test, against the real Redis.
+
+    When the first worker's lock has expired and a second worker holds the lock, the
+    first worker's release must be a no-op -- the Lua script compares tokens -- rather
+    than deleting the second worker's lock.
+    """
+    import redis.exceptions
+    from django.core.cache import cache
+
+    from django_pyoidc_keycloak.tokens.refresh import _get_lock, _lock_key
+
+    token_set.access_token_expires_at = timezone.now() - timedelta(seconds=1)
+    token_set.save()
+
+    first = _get_lock(_lock_key(token_set))
+    assert first.acquire() is True
+
+    # Simulate expiry: drop the key, then let a second worker in.
+    cache.delete(_lock_key(token_set))
+
+    second = _get_lock(_lock_key(token_set))
+    assert second.acquire() is True
+
+    # The first worker finishes and releases: it must not free the second worker's lock.
+    with pytest.raises(redis.exceptions.LockNotOwnedError):
+        first.release()
+
+    assert _raw_lock_value(_lock_key(token_set)) is not None, "the second worker's lock was deleted"
+
+    second.release()
+    assert _raw_lock_value(_lock_key(token_set)) is None
 
 
 # -- exchange -----------------------------------------------------------
 
+# The runtime gate (SECURITY_REVIEW.md, finding 7) is on for these tests individually.
+
+
+@pytest.fixture
+def exchange_enabled(settings):
+    settings.KEYCLOAK = {**settings.KEYCLOAK, "TOKEN_EXCHANGE_ENABLED": True}
+
+
+def test_exchange_is_refused_when_the_feature_is_disabled():
+    """The system check is not a gate; the call itself must refuse."""
+    with respx.mock:
+        route = respx.post(TOKEN_URL)
+
+        with pytest.raises(TokensUnavailable, match="Token exchange is disabled"):
+            exchange_access_token(JWT, audience="reports")
+
+        assert route.call_count == 0, "a disabled exchange must never reach Keycloak"
+
 
 @respx.mock
-def test_exchange_uses_the_login_client_and_the_right_grant():
+def test_exchange_uses_the_login_client_and_the_right_grant(exchange_enabled):
     respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "downstream"}))
 
     assert exchange_access_token(JWT, audience="reports") == "downstream"
@@ -334,7 +401,7 @@ def test_exchange_uses_the_login_client_and_the_right_grant():
 
 
 @respx.mock
-def test_a_refused_exchange_explains_the_keycloak_requirements():
+def test_a_refused_exchange_explains_the_keycloak_requirements(exchange_enabled):
     respx.post(TOKEN_URL).mock(return_value=httpx.Response(403, text="not allowed"))
 
     with pytest.raises(TokensUnavailable, match="Standard token exchange"):
@@ -342,7 +409,7 @@ def test_a_refused_exchange_explains_the_keycloak_requirements():
 
 
 @respx.mock
-def test_exchanged_tokens_are_never_cached():
+def test_exchanged_tokens_are_never_cached(exchange_enabled):
     from django.core.cache import cache
 
     respx.post(TOKEN_URL).mock(return_value=httpx.Response(200, json={"access_token": "downstream"}))
@@ -373,3 +440,14 @@ def test_a_granted_offline_scope_marks_the_set_offline(user, session):
     )
 
     assert token_set.is_offline is True
+
+
+def test_offline_detection_matches_a_whole_scope_token(user, session):
+    """Finding 6: "notoffline_access" must not read as "offline_access"."""
+    token_set = store_tokens(
+        session=session,
+        user=user,
+        raw=RawTokens(access_token=JWT, refresh_token="r", scope="openid notoffline_access"),
+    )
+
+    assert token_set.is_offline is False

@@ -103,8 +103,9 @@ def store_tokens(*, session: Any, user: Any, raw: RawTokens, is_offline: bool | 
             "scope": raw.scope[:500],
             # Derived from the granted scope. Requesting offline_access does not mean
             # Keycloak issued an offline token, and mislabelling one changes how its expiry
-            # is interpreted.
-            "is_offline": "offline_access" in (raw.scope or "") if is_offline is None else is_offline,
+            # is interpreted. Scope tokens are space-delimited, so match exactly rather
+            # than by substring: "notoffline_access" is not "offline_access".
+            "is_offline": "offline_access" in (raw.scope or "").split() if is_offline is None else is_offline,
         },
     )
     logger.debug(

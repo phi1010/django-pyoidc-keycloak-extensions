@@ -199,7 +199,6 @@ def check_token_exchange(app_configs: Any, **kwargs: Any) -> list:
         connection = get_connection()
     except ImproperlyConfigured as exc:
         return [Error(str(exc), id="keycloak.E006")]
-
     if not connection.client_secret:
         return [
             Error(
@@ -209,3 +208,31 @@ def check_token_exchange(app_configs: Any, **kwargs: Any) -> list:
             )
         ]
     return []
+
+
+@register()
+def check_cache_backend(app_configs: Any, **kwargs: Any) -> list:
+    """The token-refresh mutex needs django-redis's distributed lock.
+
+    redis-py's ``Lock`` -- which django-redis's ``cache.client.lock()`` returns -- acquires
+    with ``SET NX PX`` and releases through a token-checked Lua script. The previous
+    ``cache.get()``/``cache.delete()`` pair raced with lock expiry and could release
+    another worker's lock (SECURITY_REVIEW.md, finding 3), and no cache backend without a
+    token-checked release can stand in for it.
+    """
+    if not app_settings.STORE_TOKENS:
+        return []
+    backend = (getattr(settings, "CACHES", {}) or {}).get("default", {}).get("BACKEND", "")
+    if backend == "django_redis.cache.RedisCache":
+        return []
+    return [
+        Error(
+            "CACHES['default'] must use django_redis.cache.RedisCache.",
+            hint=(
+                "Token refresh takes its mutex through cache.client.lock(), which needs "
+                "django-redis. Point CACHES['default'] at "
+                "'django_redis.cache.RedisCache' with a Redis LOCATION."
+            ),
+            id="keycloak.E008",
+        )
+    ]

@@ -32,9 +32,12 @@ DATABASES = {
     }
 }
 
+# The test suite overrides this with a testcontainers Redis at start-up (see
+# tests/conftest.py); a bare `manage.py check` outside pytest uses this default.
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": "redis://127.0.0.1:6379",
     }
 }
 
