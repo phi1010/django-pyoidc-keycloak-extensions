@@ -8,6 +8,8 @@ django-pyoidc handles the OIDC login flow and stops there. This library adds wha
 needs when Keycloak is the system of record:
 
 * **Identity is the Keycloak UUID**, not an email address. Emails change and get reused.
+* **There is no password column.** Keycloak is the only authenticator, so the field is
+  removed rather than filled with a hash nothing ever reads.
 * **Users stay in step with Keycloak** — renames, disables and deletions arrive through
   event polling, with full reconciliation as the correctness backstop.
 * **Deleted accounts are removed, or anonymised** when local data still references them.
@@ -260,7 +262,17 @@ request.user.active_groups()                       # unexpired memberships
 request.user.active_roles()                        # unexpired assignments
 request.user.has_role("feature1-editor", "django-app")
 request.user.has_role("app-admin")                 # client_id="" is a realm role
+
+request.user.groups                                # every group, expiry included
+request.user.roles                                 # every role, expiry included
+group.users                                        # and back the other way
 ```
+
+**Changed in 0.3.1:** `user.groups` and `user.roles` (and `group.users` / `role.users`) are
+read-only properties returning a queryset, not ManyToManyFields. Every read works as before;
+`.add()` and `.set()` are gone, but a `through` model with extra columns never allowed them
+anyway. They became properties so that the user model does not depend on the very models that
+point back at it — see *Your own user model*.
 
 Roles are stored *effective*: composites are expanded, both when read from the Admin API and
 in tokens, so the two paths agree. Other clients' roles are ignored unless you list them in
@@ -282,6 +294,40 @@ row records `authorization_synced_at`: Admin API synchronisation stamps it with 
 a login stamps it with the token's `iat`, and a login whose token predates the stamp leaves
 groups, roles and the staff flags alone. A claim that is missing altogether falls back to the
 Admin API for that kind of data; a present-but-empty claim means "no roles".
+
+### Your own user model
+
+`AUTH_USER_MODEL = "keycloak.KeycloakUser"` is the shortcut. A project that expects to add
+fields to the user should subclass the abstract model instead, from the start — Django cannot
+change `AUTH_USER_MODEL` after the first migrate without a hand-written migration:
+
+```python
+# accounts/models.py
+from django_pyoidc_keycloak.models import AbstractKeycloakUser
+
+
+class User(AbstractKeycloakUser):
+    department = models.CharField(max_length=100, blank=True)
+
+    class Meta(AbstractKeycloakUser.Meta):
+        abstract = False
+        swappable = "AUTH_USER_MODEL"
+```
+
+```python
+AUTH_USER_MODEL = "accounts.User"
+```
+
+`manage.py makemigrations` then writes one ordinary initial migration and `migrate` applies
+it; nothing else is needed, and the admin follows the swapped model by itself. Only the user
+is swapped here — the group, role, membership and role-assignment models stay this library's,
+because swapping one means owning its migrations too.
+
+**Changed in 0.3.1.** Before that release this did not work at all: the library's migrations
+referenced `AUTH_USER_MODEL` without declaring a `swappable_dependency` (so `migrate` failed
+with *Related model 'accounts.user' cannot be resolved*), the user's `groups` / `roles`
+many-to-many fields made the dependency circular once that was fixed, and the admin
+registration was silently dropped for a swapped-out model (`admin.E039` on the inlines).
 
 ### Your own model base
 
@@ -347,6 +393,16 @@ pin it in your own project and read its release notes before upgrading.
 
 ## Notes on behaviour worth knowing
 
+* **No user has a password.** `AbstractKeycloakUser` removes the `password` column Django's
+  `AbstractBaseUser` provides, so there is no local credential to leak, rotate or brute-force,
+  and no authentication path that goes around Keycloak. `set_password()` raises,
+  `check_password()` is always `False`, and `createsuperuser` neither prompts for nor stores
+  one (Django skips the prompt when the field is absent). A bootstrap superuser still works:
+  it is unmanaged, and gets a session through `manage.py shell` or `force_login`.
+  `get_session_auth_hash()` hashes the account's identity instead of the password, so
+  sessions still work; they are ended by Keycloak's backchannel logout and by
+  `KeycloakSessionBackend` refusing a deactivated or anonymised account.
+  **Changed in 0.3.1:** the column used to exist, holding an unusable hash.
 * **Local-only users are never touched.** A user with `keycloak_id = NULL` (your bootstrap
   superuser, for instance) survives every reconciliation.
 * **Anonymisation keeps a tombstone.** `keycloak_id` is retained so a deleted Keycloak account

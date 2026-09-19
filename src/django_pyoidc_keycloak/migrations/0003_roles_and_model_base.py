@@ -11,6 +11,8 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('keycloak', '0002_alter_groupmembership_source'),
+        # RoleAssignment below points at AUTH_USER_MODEL; see 0001_initial.
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [

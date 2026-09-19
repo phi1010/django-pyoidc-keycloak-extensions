@@ -84,7 +84,6 @@ def get_user(client: Any, tokens: dict[str, Any]) -> Any:
         created = False
     except user_model.DoesNotExist:
         user = user_model(keycloak_id=keycloak_id)
-        user.set_unusable_password()
         created = True
 
     if app_settings.SYNC_ON_LOGIN or created:

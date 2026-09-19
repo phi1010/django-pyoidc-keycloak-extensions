@@ -279,7 +279,7 @@ def test_the_user_admin_offers_the_sync_actions():
 
 @pytest.fixture
 def admin_browser(client):
-    superuser = KeycloakUser.objects.create_superuser(username="root", password="pw")
+    superuser = KeycloakUser.objects.create_superuser(username="root")
     client.force_login(superuser)
     return client
 
@@ -361,7 +361,7 @@ VIEW = "keycloak.view_keycloakuser"
 
 @pytest.fixture
 def staff():
-    return KeycloakUser.objects.create_user(username="staff", password="pw", is_staff=True)
+    return KeycloakUser.objects.create_user(username="staff", is_staff=True)
 
 
 def test_the_codename_is_derived_from_the_model():

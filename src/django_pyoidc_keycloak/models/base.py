@@ -63,7 +63,16 @@ class AbstractKeycloakUser(KeycloakAuthorizationMixin, ModelBase, AbstractBaseUs
     The primary key is a locally generated UUID rather than Keycloak's ``sub`` so that
     local-only accounts can exist.  ``keycloak_id`` is the link to Keycloak and, when it is
     ``NULL``, marks the account as unmanaged.
+
+    **There is no password.**  Keycloak is the only authenticator, so the column inherited
+    from ``AbstractBaseUser`` is removed rather than filled with an unusable hash: a hash
+    that is never read is still a column to migrate, dump, back up and explain.  The
+    password API is kept, answering the only truthful answer -- see below.
     """
+
+    # Removing a field inherited from an abstract base class; Django supports this, but
+    # django-stubs types AbstractBaseUser.password as str and cannot express the removal.
+    password = None  # type: ignore[assignment]
 
     keycloak_id = models.UUIDField(
         _("Keycloak ID"),
@@ -139,6 +148,49 @@ class AbstractKeycloakUser(KeycloakAuthorizationMixin, ModelBase, AbstractBaseUs
     def get_short_name(self) -> str:
         return self.first_name or self.username
 
+    # -- The password API, for a model that has no password ----------------------------
+    #
+    # ``createsuperuser`` already copes: it looks the field up and skips the prompt when it
+    # is absent.  These overrides are for everything else that assumes AbstractBaseUser's
+    # column exists.
+
+    def set_password(self, raw_password: str | None) -> None:
+        """Always an error: a local password would be an authentication path around Keycloak."""
+        msg = (
+            f"{type(self).__name__} has no password field. Authentication goes through "
+            "Keycloak; there is no local password to set."
+        )
+        raise NotImplementedError(msg)
+
+    def check_password(self, raw_password: str | None) -> bool:
+        """Never true, and never a timing signal -- no password is ever accepted."""
+        return False
+
+    async def acheck_password(self, raw_password: str | None) -> bool:
+        return False
+
+    def set_unusable_password(self) -> None:
+        """A no-op: the password is already, permanently, unusable."""
+
+    def has_usable_password(self) -> bool:
+        return False
+
+    def _get_session_auth_hash(self, secret: str | None = None) -> str:
+        """Django hashes the password column here, to end sessions when it changes.
+
+        With no password there is nothing to hash, so this hashes the identity instead.  It
+        is stable for the life of the account, which costs nothing: sessions are ended by
+        Keycloak's backchannel logout, and ``KeycloakSessionBackend`` already refuses to
+        resolve a session whose user has been deactivated or anonymised.
+
+        Overriding this private hook rather than ``get_session_auth_hash`` keeps
+        ``get_session_auth_fallback_hash`` (SECRET_KEY_FALLBACKS) working unchanged.
+        """
+        from django.utils.crypto import salted_hmac
+
+        key_salt = "django_pyoidc_keycloak.models.base.AbstractKeycloakUser.get_session_auth_hash"
+        return salted_hmac(key_salt, f"{self.pk}:{self.keycloak_id}", secret=secret, algorithm="sha256").hexdigest()
+
 
 class AbstractKeycloakMirrored(ModelBase):
     """Something copied from the realm: a group or a role.
@@ -198,6 +250,18 @@ class AbstractKeycloakGroup(AbstractKeycloakMirrored):
     def __str__(self) -> str:
         return self.path or self.name
 
+    @property
+    def users(self) -> models.QuerySet:
+        """Members of this group, expired memberships included.
+
+        Replaces the reverse accessor the user's ``groups`` ManyToManyField used to create;
+        see the note in :class:`~django_pyoidc_keycloak.permissions.KeycloakAuthorizationMixin`.
+        """
+        from django.apps import apps
+
+        user_model = apps.get_model(app_settings.user_model)
+        return user_model.objects.filter(memberships__group=self).distinct()
+
 
 class AbstractKeycloakRole(AbstractKeycloakMirrored):
     """A realm or client role mirrored from Keycloak.
@@ -232,6 +296,14 @@ class AbstractKeycloakRole(AbstractKeycloakMirrored):
     @property
     def is_realm_role(self) -> bool:
         return self.client_id == ""
+
+    @property
+    def users(self) -> models.QuerySet:
+        """Holders of this role, expired assignments included. See AbstractKeycloakGroup.users."""
+        from django.apps import apps
+
+        user_model = apps.get_model(app_settings.user_model)
+        return user_model.objects.filter(role_assignments__role=self).distinct()
 
 
 class AbstractGrant(ModelBase):

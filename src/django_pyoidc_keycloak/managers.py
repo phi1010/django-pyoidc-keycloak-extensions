@@ -21,13 +21,14 @@ class KeycloakUserManager(BaseUserManager):
         if not username:
             msg = "A username is required."
             raise ValueError(msg)
+        if password:
+            # The user model has no password column at all, so accepting one here would
+            # silently discard it and leave the caller believing the account has a local
+            # login. Authentication goes through Keycloak; there is nothing to store.
+            msg = "This user model has no password. Authentication goes through Keycloak."
+            raise ValueError(msg)
         email = self.normalize_email(email) if email else ""
         user = self.model(username=self.model.normalize_username(username), email=email, **extra)
-        if password:
-            user.set_password(password)
-        else:
-            # Authentication happens through Keycloak; there is no local password to check.
-            user.set_unusable_password()
         user.save(using=self._db)
         return user
 

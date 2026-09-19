@@ -15,6 +15,12 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('django_pyoidc', '0001_initial'),
+        # GroupMembership and OIDCTokenSet below point at AUTH_USER_MODEL. Without this
+        # the swapped-in user model is not guaranteed to exist yet and migrate fails with
+        # "Related model '<app>.<user>' cannot be resolved". When AUTH_USER_MODEL is this
+        # app's own KeycloakUser it resolves to ('keycloak', '__first__'), a same-app
+        # __first__ reference, which Django's migration loader ignores (#22325).
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [

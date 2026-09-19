@@ -91,11 +91,18 @@ def test_the_models_have_no_permission_fields():
     assert "permissions" not in group_fields
 
 
-def test_the_user_model_has_no_link_to_django_groups():
-    """`groups` points at the Keycloak group model, not auth.Group."""
-    related = get_user_model()._meta.get_field("groups").related_model
+def test_the_user_model_has_no_link_to_django_groups(user):
+    """`groups` yields Keycloak groups, and is not a field at all.
 
-    assert related is KeycloakGroup
+    It used to be a ManyToManyField; it is a property now, so that the user model does not
+    depend on the through models that point back at it (a circular migration dependency for
+    any project that swaps AUTH_USER_MODEL). Reads are unchanged.
+    """
+    user_model = get_user_model()
+    field_names = {f.name for f in user_model._meta.get_fields()}
+
+    assert "groups" not in field_names
+    assert user.groups.model is KeycloakGroup
 
 
 def test_active_groups_excludes_expired_memberships(user):

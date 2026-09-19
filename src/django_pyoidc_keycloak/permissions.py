@@ -68,28 +68,38 @@ class KeycloakAuthorizationMixin(models.Model):
         default=False,
         help_text=_("Grants every permission without consulting the authorization backend."),
     )
-    groups = models.ManyToManyField(
-        app_settings.group_model,
-        through=app_settings.membership_model,
-        # GroupMembership has a second FK to the user model (created_by), so name the pair.
-        through_fields=("user", "group"),
-        related_name="users",
-        blank=True,
-        verbose_name=_("groups"),
-        help_text=_("Group membership, mirrored from Keycloak. Grants no permission by itself."),
-    )
-    roles = models.ManyToManyField(
-        app_settings.role_model,
-        through=app_settings.role_assignment_model,
-        through_fields=("user", "role"),
-        related_name="users",
-        blank=True,
-        verbose_name=_("roles"),
-        help_text=_("Realm and client roles, mirrored from Keycloak. Grants no permission by itself."),
-    )
+    # ``groups`` and ``roles`` are deliberately *properties* rather than ManyToManyFields.
+    #
+    # As fields they made the user model depend on GroupMembership and RoleAssignment, which
+    # in turn have foreign keys back to AUTH_USER_MODEL. Inside this app that is harmless --
+    # one app, one migration graph -- but a project that points AUTH_USER_MODEL at its own
+    # subclass of AbstractKeycloakUser then has a genuine circular migration dependency
+    # (CircularDependencyError: keycloak.0003, <project>.0001) that it can only escape by
+    # hand-splitting its initial migration in two. Nothing was gained in exchange: both
+    # through models carry extra columns, so ``.add()`` / ``.set()`` were never usable, and
+    # every write in this library goes through the through models directly.
+    #
+    # Reads are unchanged -- these return the same queryset the descriptors did, so
+    # ``user.groups.filter(...)``, ``.values_list(...)`` and iteration all still work.
 
     class Meta:
         abstract = True
+
+    @property
+    def groups(self) -> models.QuerySet:
+        """Every group this user belongs to, expired memberships included."""
+        from django.apps import apps
+
+        group_model = apps.get_model(app_settings.group_model)
+        return group_model.objects.filter(memberships__user=self).distinct()
+
+    @property
+    def roles(self) -> models.QuerySet:
+        """Every role assigned to this user, expired assignments included."""
+        from django.apps import apps
+
+        role_model = apps.get_model(app_settings.role_model)
+        return role_model.objects.filter(assignments__user=self).distinct()
 
     def has_perm(self, perm: str, obj: Any = None) -> bool:
         if not self.is_active:
@@ -129,14 +139,14 @@ class KeycloakAuthorizationMixin(models.Model):
         return self.groups.filter(
             Q(memberships__expires_at__isnull=True) | Q(memberships__expires_at__gt=timezone.now()),
             memberships__user=self,
-        ).distinct()
+        )
 
     def active_roles(self) -> models.QuerySet:
         """Roles whose assignment has not expired."""
         return self.roles.filter(
             Q(assignments__expires_at__isnull=True) | Q(assignments__expires_at__gt=timezone.now()),
             assignments__user=self,
-        ).distinct()
+        )
 
     def has_role(self, name: str, client_id: str = "") -> bool:
         """Whether an unexpired assignment grants this role. ``client_id=""`` means a realm role."""

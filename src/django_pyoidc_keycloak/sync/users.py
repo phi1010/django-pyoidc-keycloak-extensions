@@ -131,7 +131,6 @@ def sync_user(
             return None
         logger.debug("No local user for %s; creating one", kc_id)
         user = user_model(keycloak_id=kc_id)
-        user.set_unusable_password()
         created_now = True
 
     if user.is_anonymized:
@@ -239,7 +238,6 @@ def anonymize(user: Any) -> None:
     user.is_superuser = False
     user.keycloak_attributes = {}
     user.is_anonymized = True
-    user.set_unusable_password()
     # keycloak_id is deliberately kept as a tombstone, so the same Keycloak account is never
     # re-imported as a fresh user.
     user.save()

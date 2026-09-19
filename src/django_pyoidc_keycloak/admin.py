@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from django.contrib import admin, messages
+from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group as DjangoGroup
 from django.core.exceptions import PermissionDenied
 from django.http import HttpRequest, HttpResponseRedirect
@@ -33,7 +34,6 @@ from django_pyoidc_keycloak.models import (
     GroupMembership,
     KeycloakGroup,
     KeycloakRole,
-    KeycloakUser,
     RoleAssignment,
     SyncRun,
 )
@@ -132,7 +132,6 @@ class RoleAssignmentInline(admin.TabularInline):
     readonly_fields = ("created_at",)
 
 
-@admin.register(KeycloakUser)
 class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
     list_display = ("username", "email", "is_active", "is_staff", "is_superuser", "managed", "last_synced_at")
     list_filter = (ManagedFilter, "is_active", "is_staff", "is_superuser", "is_anonymized")
@@ -454,3 +453,12 @@ class SyncRunAdmin(admin.ModelAdmin):
 
     def get_readonly_fields(self, request: HttpRequest, obj: Any = None) -> list[str]:
         return [field.name for field in self.model._meta.fields]
+
+
+# Registered explicitly, and against whatever AUTH_USER_MODEL resolves to.
+#
+# `@admin.register(KeycloakUser)` looked equivalent but was not: AdminSite.register silently
+# ignores a model that has been swapped out, so a project pointing AUTH_USER_MODEL at its own
+# subclass got no user admin at all -- and then admin.E039 on the two inlines below, whose
+# autocomplete_fields reference a user admin that was never registered.
+admin.site.register(get_user_model(), KeycloakUserAdmin)
