@@ -628,9 +628,7 @@ def test_reconcile_runs_a_full_pass(client, staff, monkeypatch, without_celery):
     """Unlike "synchronise everything", this imports and removes -- see full_reconcile."""
     called = []
     stats = {"created": 1, "updated": 2, "deleted": 0, "anonymized": 0, "skipped": 3}
-    monkeypatch.setattr(
-        "django_pyoidc_keycloak.admin.full_reconcile", lambda: called.append(True) or stats
-    )
+    monkeypatch.setattr("django_pyoidc_keycloak.admin.full_reconcile", lambda: called.append(True) or stats)
     StubPolicyBackend.policy = ALL_SYNC_VERBS
     client.force_login(staff)
 
@@ -644,12 +642,8 @@ def test_reconcile_enqueues_when_celery_is_available(client, staff, monkeypatch)
     """With a worker to take it, the request does not block on a whole-realm pass."""
     queued = []
     monkeypatch.setattr("django_pyoidc_keycloak.admin.CELERY_AVAILABLE", True)
-    monkeypatch.setattr(
-        "django_pyoidc_keycloak.tasks.reconcile_task.delay", lambda *a, **kw: queued.append((a, kw))
-    )
-    monkeypatch.setattr(
-        "django_pyoidc_keycloak.admin.full_reconcile", lambda: pytest.fail("should have enqueued")
-    )
+    monkeypatch.setattr("django_pyoidc_keycloak.tasks.reconcile_task.delay", lambda *a, **kw: queued.append((a, kw)))
+    monkeypatch.setattr("django_pyoidc_keycloak.admin.full_reconcile", lambda: pytest.fail("should have enqueued"))
     StubPolicyBackend.policy = ALL_SYNC_VERBS
     client.force_login(staff)
 

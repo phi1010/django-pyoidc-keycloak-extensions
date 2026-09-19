@@ -256,7 +256,7 @@ line, or an admin page.
 from django_pyoidc_keycloak.tokens.refresh import get_access_token_for_user
 from django_pyoidc_keycloak.tokens.exchange import exchange_token
 
-token = get_access_token_for_user(request.user)          # refreshed if near expiry
+token = get_access_token_for_user(request.user)  # refreshed if near expiry
 downstream = exchange_token(request.user, audience="reports-api")
 ```
 
@@ -282,14 +282,14 @@ Keycloak's group tree, its realm roles and the roles of your OIDC client are mir
 rows are an admin override that survives synchronisation until `expires_at` passes.
 
 ```python
-request.user.active_groups()                       # unexpired memberships
-request.user.active_roles()                        # unexpired assignments
+request.user.active_groups()  # unexpired memberships
+request.user.active_roles()  # unexpired assignments
 request.user.has_role("feature1-editor", "django-app")
-request.user.has_role("app-admin")                 # client_id="" is a realm role
+request.user.has_role("app-admin")  # client_id="" is a realm role
 
-request.user.groups                                # every group, expiry included
-request.user.roles                                 # every role, expiry included
-group.users                                        # and back the other way
+request.user.groups  # every group, expiry included
+request.user.roles  # every role, expiry included
+group.users  # and back the other way
 ```
 
 **Changed in 0.3.1:** `user.groups` and `user.roles` (and `group.users` / `role.users`) are

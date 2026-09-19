@@ -143,9 +143,7 @@ class SyncPermissionMixin:
             apps.get_model(app_settings.group_model),
             apps.get_model(app_settings.role_model),
         ]
-        return all(
-            request.user.has_perm(f"{m._meta.app_label}.sync_{m._meta.model_name}") for m in models
-        )
+        return all(request.user.has_perm(f"{m._meta.app_label}.sync_{m._meta.model_name}") for m in models)
 
     def get_urls(self) -> list:
         """Adds this admin's ``sync-all/`` and ``reconcile/`` endpoints, named after its own model."""
@@ -531,7 +529,6 @@ class KeycloakGroupAdmin(SyncPermissionMixin, admin.ModelAdmin):
             self.message_user(request, _("Queued a full group reconciliation."), messages.INFO)
             return
         self.report_sync(request, sync_groups())
-
 
     @admin.display(boolean=True, description=_("Keycloak"))
     def managed(self, obj: Any) -> bool:
