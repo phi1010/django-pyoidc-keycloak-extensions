@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 from django.utils import timezone
 
+from django_pyoidc_keycloak.admin_api.exceptions import KeycloakNotFound
 from django_pyoidc_keycloak.models import KeycloakRole, RoleAssignment
 from django_pyoidc_keycloak.models.base import MembershipSource
 from django_pyoidc_keycloak.signals import role_assignment_changed
@@ -18,6 +19,7 @@ from django_pyoidc_keycloak.sync.roles import (
     role_clients,
     sweep_expired_role_assignments,
     sync_roles,
+    sync_roles_by_ids,
     sync_user_roles,
 )
 from django_pyoidc_keycloak.sync.users import sync_user
@@ -223,3 +225,54 @@ def test_an_empty_list_leaves_that_flag_alone(user, settings):
 
     assert user.is_superuser is True
     assert user.is_staff is False
+
+
+# -- synchronising only the selected roles ------------------------------
+
+
+def test_sync_roles_by_ids_refreshes_only_those_roles(client_stub):
+    viewer = kc_role("feature1-viewer")
+    editor = kc_role("feature1-editor")
+    client_stub.list_client_roles.return_value = [viewer, editor]
+    sync_roles(client=client_stub)
+    client_stub.get_role_by_id.return_value = {**viewer, "description": "may read"}
+
+    counts = sync_roles_by_ids([uuid.UUID(viewer["id"])], client=client_stub)
+
+    assert counts == {"created": 0, "updated": 1, "deleted": 0, "errors": 0}
+    assert KeycloakRole.objects.get(keycloak_id=viewer["id"]).description == "may read"
+    assert KeycloakRole.objects.filter(keycloak_id=editor["id"]).exists()
+
+
+def test_sync_roles_by_ids_keeps_the_client(client_stub):
+    """/roles-by-id reports the container as a UUID; the local row already knows the clientId."""
+    role = kc_role("feature1-viewer")
+    client_stub.list_client_roles.return_value = [role]
+    sync_roles(client=client_stub)
+    client_stub.get_role_by_id.return_value = role
+
+    sync_roles_by_ids([uuid.UUID(role["id"])], client=client_stub)
+
+    assert KeycloakRole.objects.get(keycloak_id=role["id"]).client_id == "django-app"
+
+
+def test_sync_roles_by_ids_removes_a_role_the_realm_has_dropped(client_stub):
+    role = kc_role("gone")
+    client_stub.list_realm_roles.return_value = [role]
+    sync_roles(client=client_stub)
+    client_stub.get_role_by_id.side_effect = KeycloakNotFound("404")
+
+    counts = sync_roles_by_ids([uuid.UUID(role["id"])], client=client_stub)
+
+    assert counts["deleted"] == 1
+    assert not KeycloakRole.objects.filter(keycloak_id=role["id"]).exists()
+
+
+def test_sync_roles_by_ids_skips_local_only_roles(client_stub):
+    local = KeycloakRole.objects.create(name="local", client_id="")
+
+    counts = sync_roles_by_ids([local.keycloak_id], client=client_stub)
+
+    assert counts == {"created": 0, "updated": 0, "deleted": 0, "errors": 0}
+    assert client_stub.get_role_by_id.call_count == 0
+    assert KeycloakRole.objects.filter(pk=local.pk).exists()

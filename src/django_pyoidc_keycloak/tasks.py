@@ -68,6 +68,42 @@ def sync_users_task(user_pks: list[str]) -> dict[str, int]:
     return sync_users(user_model.objects.filter(pk__in=user_pks))
 
 
+@shared_task(name="keycloak.sync_groups")
+def sync_groups_task() -> dict[str, int]:
+    """Mirror the whole group tree, used by the admin's "Reconcile all groups"."""
+    from django_pyoidc_keycloak.sync.groups import sync_groups
+
+    logger.debug("Celery task keycloak.sync_groups starting")
+    return sync_groups()
+
+
+@shared_task(name="keycloak.sync_selected_groups")
+def sync_selected_groups_task(keycloak_ids: list[str]) -> dict[str, int]:
+    """Refresh just these groups, used by the admin's bulk action."""
+    from django_pyoidc_keycloak.sync.groups import sync_groups_by_ids
+
+    logger.debug("Celery task keycloak.sync_selected_groups starting for %d group(s)", len(keycloak_ids))
+    return sync_groups_by_ids(keycloak_ids)
+
+
+@shared_task(name="keycloak.sync_roles")
+def sync_roles_task() -> dict[str, int]:
+    """Mirror every realm and client role, used by the admin's "Reconcile all roles"."""
+    from django_pyoidc_keycloak.sync.roles import sync_roles
+
+    logger.debug("Celery task keycloak.sync_roles starting")
+    return sync_roles()
+
+
+@shared_task(name="keycloak.sync_selected_roles")
+def sync_selected_roles_task(keycloak_ids: list[str]) -> dict[str, int]:
+    """Refresh just these roles, used by the admin's bulk action."""
+    from django_pyoidc_keycloak.sync.roles import sync_roles_by_ids
+
+    logger.debug("Celery task keycloak.sync_selected_roles starting for %d role(s)", len(keycloak_ids))
+    return sync_roles_by_ids(keycloak_ids)
+
+
 @shared_task(name="keycloak.purge_tokens")
 def purge_tokens_task() -> dict[str, int]:
     from django_pyoidc_keycloak.sync.groups import sweep_expired_memberships

@@ -1,0 +1,18 @@
+{# See change_form.html for why this is not under admin/<app>/<model>/. #}
+{% extends "admin/change_list.html" %}
+{% load i18n %}
+
+{% block object-tools-items %}
+  {% for button in keycloak_sync_buttons %}
+    {# POST forms rather than links: these change state, and Django does not CSRF-protect GET. #}
+    <li>
+      <form method="post" action="{{ button.url }}" style="display:inline">
+        {% csrf_token %}
+        <button type="submit" class="addlink" style="border:none;cursor:pointer">
+          {{ button.label }}
+        </button>
+      </form>
+    </li>
+  {% endfor %}
+  {{ block.super }}
+{% endblock %}

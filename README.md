@@ -160,13 +160,37 @@ All of the form `<app_label>.<verb>_<model_name>`, so a swapped model changes bo
 | `sync` | `keycloak.sync_keycloakuser` | Pull this record from Keycloak now. |
 
 `sync` is this library's own verb, and it is **independent of `change`** in both directions.
-It gates the "Sync now" button on the user page and the two bulk actions on the changelist.
+It is asked for per model, so `sync_keycloakuser`, `sync_keycloakgroup` and
+`sync_keycloakrole` are separate grants.
 Synchronising is neither reading nor editing: it pulls the record from the realm and, when
 the account has gone, deletes or anonymises it locally.  So a policy can grant `sync`
 without `change` -- an operator who may repair drift but not hand-edit fields -- or `change`
 without `sync`, for someone who administers local-only accounts but must not trigger Admin
-API traffic.  Without the verb the button is not rendered and the actions do not appear in
-the changelist dropdown.
+API traffic.  Without the verb neither the buttons nor the actions are rendered.
+
+### What the admin offers
+
+Users, groups and roles each have the same two, on top of the user page's "Sync now":
+
+| Where | What |
+| --- | --- |
+| Changelist button | Synchronise **everything** of that kind, pruning what the realm no longer has. |
+| Changelist button | **Full reconcile** of the realm — the same work as `manage.py keycloak_reconcile`. |
+| Changelist action | Synchronise the **selected** rows only, leaving the rest alone. |
+
+The reconcile button is realm-wide, so it appears on all three changelists and does more
+than "synchronise everything": it also *imports* accounts that have never logged in (when
+`IMPORT_ALL_USERS` is on), deletes or anonymises accounts Keycloak no longer has, sweeps
+expired overrides, and records a `SyncRun`. Because it rewrites users, groups and roles
+alike, it needs the `sync` verb on **all three** models — otherwise holding only
+`sync_keycloakgroup` would start a pass that deletes user accounts.
+
+Both buttons enqueue through Celery when it is configured, and run inline otherwise.
+
+**Changed in 0.3.2:** "synchronise everything" is a button rather than a dropdown action.
+Django's actions only run against a selection, so as an action it required ticking a row it
+then ignored. Groups and roles gained both; before, they could only be synchronised by a
+full `keycloak_reconcile`.
 
 No `Permission` row is created for `sync` (none is created for anything -- see
 `CREATE_DJANGO_PERMISSIONS`); the string is simply what your backend is asked about.

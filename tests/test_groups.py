@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 from django.utils import timezone
 
+from django_pyoidc_keycloak.admin_api.exceptions import KeycloakNotFound
 from django_pyoidc_keycloak.models import GroupMembership, KeycloakGroup
 from django_pyoidc_keycloak.models.base import MembershipSource
 from django_pyoidc_keycloak.signals import membership_changed
@@ -15,6 +16,7 @@ from django_pyoidc_keycloak.sync.groups import (
     apply_group_paths,
     sweep_expired_memberships,
     sync_groups,
+    sync_groups_by_ids,
     sync_user_groups,
 )
 from django_pyoidc_keycloak.sync.users import sync_user
@@ -174,3 +176,59 @@ def test_a_claim_cannot_grant_membership_in_a_local_only_group(user):
     apply_group_paths(user, ["/admins"])
 
     assert user.memberships.count() == 0
+
+
+# -- synchronising only the selected groups -----------------------------
+
+
+def test_sync_groups_by_ids_refreshes_only_those_groups(client_stub):
+    """The rest of the tree is left alone -- no walk, no pruning."""
+    staff = kc_group("staff", "/staff")
+    other = kc_group("other", "/other")
+    client_stub.list_groups.return_value = [staff, other]
+    sync_groups(client=client_stub)
+    client_stub.get_group.return_value = {**staff, "name": "renamed"}
+
+    counts = sync_groups_by_ids([uuid.UUID(staff["id"])], client=client_stub)
+
+    assert counts == {"created": 0, "updated": 1, "deleted": 0, "errors": 0}
+    assert KeycloakGroup.objects.get(keycloak_id=staff["id"]).name == "renamed"
+    # Untouched, where a full sync_groups would have re-read it.
+    assert KeycloakGroup.objects.filter(keycloak_id=other["id"]).exists()
+
+
+def test_sync_groups_by_ids_keeps_the_parent(client_stub):
+    """A group fetched by id has no parent in hand; clearing it would flatten the tree."""
+    child = kc_group("support", "/staff/support")
+    client_stub.list_groups.return_value = [kc_group("staff", "/staff", [child])]
+    sync_groups(client=client_stub)
+    client_stub.get_group.return_value = child
+
+    sync_groups_by_ids([uuid.UUID(child["id"])], client=client_stub)
+
+    support = KeycloakGroup.objects.get(path="/staff/support")
+    assert support.parent is not None
+    assert support.parent.path == "/staff"
+
+
+def test_sync_groups_by_ids_removes_a_group_the_realm_has_dropped(client_stub):
+    group = kc_group("gone", "/gone")
+    client_stub.list_groups.return_value = [group]
+    sync_groups(client=client_stub)
+    client_stub.get_group.side_effect = KeycloakNotFound("404")
+
+    counts = sync_groups_by_ids([uuid.UUID(group["id"])], client=client_stub)
+
+    assert counts["deleted"] == 1
+    assert not KeycloakGroup.objects.filter(keycloak_id=group["id"]).exists()
+
+
+def test_sync_groups_by_ids_skips_local_only_groups(client_stub):
+    """A locally created group is not in the realm and must never be fetched or pruned."""
+    local = KeycloakGroup.objects.create(name="local", path="/local")
+
+    counts = sync_groups_by_ids([local.keycloak_id], client=client_stub)
+
+    assert counts == {"created": 0, "updated": 0, "deleted": 0, "errors": 0}
+    assert client_stub.get_group.call_count == 0
+    assert KeycloakGroup.objects.filter(pk=local.pk).exists()

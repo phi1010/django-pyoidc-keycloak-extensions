@@ -38,7 +38,9 @@ from django_pyoidc_keycloak.models import (
     SyncRun,
 )
 from django_pyoidc_keycloak.models.base import MembershipSource
-from django_pyoidc_keycloak.sync.reconcile import sync_users
+from django_pyoidc_keycloak.sync.groups import sync_groups, sync_groups_by_ids
+from django_pyoidc_keycloak.sync.reconcile import full_reconcile, sync_users
+from django_pyoidc_keycloak.sync.roles import sync_roles, sync_roles_by_ids
 from django_pyoidc_keycloak.sync.users import handle_missing_user, sync_user
 from django_pyoidc_keycloak.tasks import CELERY_AVAILABLE
 
@@ -86,6 +88,13 @@ class ManagedFilter(admin.SimpleListFilter):
         return queryset
 
 
+#: The admin templates, named explicitly on every ModelAdmin below. Django's default
+#: lookup is ``admin/<app_label>/<model_name>/change_form.html``, which stops resolving the
+#: moment a project points AUTH_USER_MODEL at a model of its own.
+SYNC_CHANGE_FORM_TEMPLATE = "django_pyoidc_keycloak/change_form.html"
+SYNC_CHANGE_LIST_TEMPLATE = "django_pyoidc_keycloak/change_list.html"
+
+
 class SyncPermissionMixin:
     """Adds a per-model ``sync`` verb, independent of Django's four.
 
@@ -100,11 +109,145 @@ class SyncPermissionMixin:
     *its* model: ``<app_label>.sync_<model_name>``, for example ``keycloak.sync_keycloakuser``.
     """
 
+    # Supplied by the ModelAdmin this is mixed into.
     opts: Any
+    admin_site: Any
 
     def has_sync_permission(self, request: HttpRequest, obj: Any = None) -> bool:
         """Django's action machinery calls this with the request alone, as it does for delete."""
         return request.user.has_perm(f"{self.opts.app_label}.sync_{self.opts.model_name}")
+
+    def admin_url_name(self, suffix: str) -> str:
+        """``admin:<app_label>_<model_name>_<suffix>`` for *this* admin's model.
+
+        Never hard-code ``keycloak_keycloakuser_...``: a project that points AUTH_USER_MODEL
+        at its own model registers under that model's labels instead, and every hard-coded
+        reverse() raises NoReverseMatch.
+        """
+        return f"admin:{self.opts.app_label}_{self.opts.model_name}_{suffix}"
+
+    def admin_url(self, suffix: str, *args: Any) -> str:
+        return reverse(self.admin_url_name(suffix), args=args)
+
+    def has_reconcile_permission(self, request: HttpRequest) -> bool:
+        """A full reconcile rewrites users, groups *and* roles, so it needs the verb on all three.
+
+        Gating it on this admin's own model would let someone holding only
+        ``sync_keycloakgroup`` trigger a pass that deletes and anonymises user accounts.
+        """
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+
+        models = [
+            get_user_model(),
+            apps.get_model(app_settings.group_model),
+            apps.get_model(app_settings.role_model),
+        ]
+        return all(
+            request.user.has_perm(f"{m._meta.app_label}.sync_{m._meta.model_name}") for m in models
+        )
+
+    def get_urls(self) -> list:
+        """Adds this admin's ``sync-all/`` and ``reconcile/`` endpoints, named after its own model."""
+        prefix = f"{self.opts.app_label}_{self.opts.model_name}"
+        return [
+            path(
+                "sync-all/",
+                self.admin_site.admin_view(self.sync_all_view),
+                name=f"{prefix}_sync_all",
+            ),
+            path(
+                "reconcile/",
+                self.admin_site.admin_view(self.reconcile_view),
+                name=f"{prefix}_reconcile",
+            ),
+            *super().get_urls(),  # type: ignore[misc]
+        ]
+
+    @method_decorator(require_POST)
+    def reconcile_view(self, request: HttpRequest) -> Any:
+        """The changelist's "full reconcile" button.
+
+        The whole realm in one pass: users, groups and roles, plus the removal of accounts
+        Keycloak no longer has and a sweep of expired overrides -- the same work as
+        ``manage.py keycloak_reconcile``, recorded as a SyncRun. Offered on every one of
+        these changelists because it is realm-wide, not per model.
+
+        Unlike "synchronise everything", this *imports* accounts that have never logged in
+        when ``IMPORT_ALL_USERS`` is on, and deletes or anonymises those that have vanished.
+        """
+        if not self.has_reconcile_permission(request):
+            logger.debug("Refusing a reconcile request from user %s: no sync permission", request.user.pk)
+            raise PermissionDenied
+
+        if CELERY_AVAILABLE:
+            from django_pyoidc_keycloak.tasks import reconcile_task
+
+            reconcile_task.delay()
+            self.message_user(  # type: ignore[attr-defined]
+                request, _("Queued a full reconciliation of the realm."), messages.INFO
+            )
+        else:
+            stats = full_reconcile()
+            self.message_user(  # type: ignore[attr-defined]
+                request,
+                _(
+                    "Reconciled: %(created)d created, %(updated)d updated, %(deleted)d deleted, "
+                    "%(anonymized)d anonymised, %(skipped)d skipped."
+                )
+                % stats,
+                messages.SUCCESS,
+            )
+        return HttpResponseRedirect(self.admin_url("changelist"))
+
+    @method_decorator(require_POST)
+    def sync_all_view(self, request: HttpRequest) -> Any:
+        """The changelist's "synchronise everything" button.
+
+        A button rather than a dropdown action: Django's actions only run against a
+        selection, so "synchronise ALL" sat behind ticking a checkbox it then ignored.
+
+        POST-only and permission-checked for the same reasons as the per-object view.
+        """
+        if not self.has_sync_permission(request):
+            logger.debug("Refusing a 'sync all' request from user %s: no sync permission", request.user.pk)
+            raise PermissionDenied
+        self.run_sync_all(request)
+        return HttpResponseRedirect(self.admin_url("changelist"))
+
+    def run_sync_all(self, request: HttpRequest) -> None:
+        """What the button does. Implemented per model."""
+        raise NotImplementedError
+
+    def changelist_view(self, request: HttpRequest, extra_context: Any = None) -> Any:
+        extra_context = extra_context or {}
+        # Each button is listed only for someone who may actually press it, so nobody is
+        # offered one that would answer 403.
+        buttons = []
+        if self.has_sync_permission(request):
+            buttons.append({"url": self.admin_url("sync_all"), "label": self.sync_all_label})
+        if self.has_reconcile_permission(request):
+            buttons.append({"url": self.admin_url("reconcile"), "label": self.reconcile_label})
+        extra_context["keycloak_sync_buttons"] = buttons
+        return super().changelist_view(request, extra_context)  # type: ignore[misc]
+
+    #: Wording of the "synchronise everything of this kind" button.
+    sync_all_label = _("Synchronise everything from Keycloak")
+    #: Wording of the realm-wide reconcile button. The same on every changelist.
+    reconcile_label = _("Full reconcile of the realm")
+
+    def report_sync(self, request: HttpRequest, stats: dict) -> None:
+        """Turn a sync function's counts into one admin message."""
+        self.message_user(  # type: ignore[attr-defined]
+            request,
+            _("Created %(created)d, updated %(updated)d, removed %(deleted)d.")
+            % {
+                "created": stats.get("created", 0),
+                "updated": stats.get("updated", 0),
+                "deleted": stats.get("deleted", 0),
+            },
+            messages.WARNING if stats.get("errors") else messages.SUCCESS,
+        )
 
 
 class GroupMembershipInline(admin.TabularInline):
@@ -133,12 +276,14 @@ class RoleAssignmentInline(admin.TabularInline):
 
 
 class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
+    change_form_template = SYNC_CHANGE_FORM_TEMPLATE
+    change_list_template = SYNC_CHANGE_LIST_TEMPLATE
     list_display = ("username", "email", "is_active", "is_staff", "is_superuser", "managed", "last_synced_at")
     list_filter = (ManagedFilter, "is_active", "is_staff", "is_superuser", "is_anonymized")
     search_fields = ("username", "email", "first_name", "last_name", "keycloak_id")
     ordering = ("username",)
     inlines = [GroupMembershipInline, RoleAssignmentInline]
-    actions = ["action_sync_selected", "action_sync_all"]
+    actions = ["action_sync_selected"]
 
     fieldsets = (
         (None, {"fields": ("id", "keycloak_id", "username", "email")}),
@@ -203,16 +348,20 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
 
     # -- actions --------------------------------------------------------
 
+    sync_all_label = _("Synchronise ALL users from Keycloak")
+
     def get_urls(self) -> list:
-        urls = super().get_urls()
-        custom = [
+        return [
             path(
                 "<path:object_id>/sync/",
                 self.admin_site.admin_view(self.sync_single_view),
-                name="keycloak_keycloakuser_sync",
-            )
+                name=f"{self.opts.app_label}_{self.opts.model_name}_sync",
+            ),
+            *super().get_urls(),
         ]
-        return custom + urls
+
+    def run_sync_all(self, request: HttpRequest) -> None:
+        self._run_sync(request, self.model.objects.filter(keycloak_id__isnull=False), all_users=True)
 
     @method_decorator(require_POST)
     def sync_single_view(self, request: HttpRequest, object_id: str) -> Any:
@@ -232,7 +381,7 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
         user = self.get_object(request, object_id)
         if user is None:
             self.message_user(request, _("That user no longer exists."), messages.WARNING)
-            return HttpResponseRedirect(reverse("admin:keycloak_keycloakuser_changelist"))
+            return HttpResponseRedirect(self.admin_url("changelist"))
 
         if user.keycloak_id is None:
             self.message_user(request, _("This is a local-only account; there is nothing to sync."), messages.WARNING)
@@ -247,11 +396,11 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
                     _("The account no longer exists in Keycloak (%(outcome)s).") % {"outcome": outcome},
                     messages.WARNING,
                 )
-                return HttpResponseRedirect(reverse("admin:keycloak_keycloakuser_changelist"))
+                return HttpResponseRedirect(self.admin_url("changelist"))
             except KeycloakError as exc:
                 self.message_user(request, str(exc), messages.ERROR)
 
-        return HttpResponseRedirect(reverse("admin:keycloak_keycloakuser_change", args=[object_id]))
+        return HttpResponseRedirect(self.admin_url("change", object_id))
 
     def save_formset(self, request: HttpRequest, form: Any, formset: Any, change: bool) -> None:
         """Memberships and assignments added here are manual overrides, like those added on their own page.
@@ -274,7 +423,7 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
         if self.has_sync_permission(request):
             # The template guards on this being present, so a user without the verb is not
             # shown a button that would only 403.
-            extra_context["keycloak_sync_url"] = reverse("admin:keycloak_keycloakuser_sync", args=[object_id])
+            extra_context["keycloak_sync_url"] = self.admin_url("sync", object_id)
         return super().change_view(request, object_id, form_url, extra_context)
 
     # ``permissions`` is what makes Django check: without it a custom action runs for any
@@ -282,10 +431,6 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
     @admin.action(description=_("Synchronise selected users from Keycloak"), permissions=["sync"])
     def action_sync_selected(self, request: HttpRequest, queryset: Any) -> None:
         self._run_sync(request, queryset)
-
-    @admin.action(description=_("Synchronise ALL users from Keycloak"), permissions=["sync"])
-    def action_sync_all(self, request: HttpRequest, queryset: Any) -> None:
-        self._run_sync(request, self.model.objects.filter(keycloak_id__isnull=False), all_users=True)
 
     def _run_sync(self, request: HttpRequest, queryset: Any, *, all_users: bool = False) -> None:
         """Enqueue when Celery is available, otherwise run inline within a size cap."""
@@ -340,11 +485,53 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
 
 
 @admin.register(KeycloakGroup)
-class KeycloakGroupAdmin(admin.ModelAdmin):
+class KeycloakGroupAdmin(SyncPermissionMixin, admin.ModelAdmin):
+    change_form_template = SYNC_CHANGE_FORM_TEMPLATE
+    change_list_template = SYNC_CHANGE_LIST_TEMPLATE
     list_display = ("path", "name", "managed", "member_count", "last_synced_at")
     list_filter = ("last_synced_at",)
     search_fields = ("name", "path", "keycloak_id")
     ordering = ("path",)
+    actions = ["action_sync_selected"]
+    sync_all_label = _("Reconcile ALL groups from Keycloak")
+
+    @admin.action(description=_("Synchronise selected groups from Keycloak"), permissions=["sync"])
+    def action_sync_selected(self, request: HttpRequest, queryset: Any) -> None:
+        """Refresh the ticked groups only, without pruning the rest of the tree."""
+        keycloak_ids = list(queryset.filter(keycloak_id__isnull=False).values_list("keycloak_id", flat=True))
+        if not keycloak_ids:
+            self.message_user(request, _("None of the selected groups are managed by Keycloak."), messages.WARNING)
+            return
+
+        if CELERY_AVAILABLE:
+            from django_pyoidc_keycloak.tasks import sync_selected_groups_task
+
+            sync_selected_groups_task.delay([str(kc_id) for kc_id in keycloak_ids])
+            self.message_user(
+                request,
+                ngettext(
+                    "Queued %(count)d group for synchronisation.",
+                    "Queued %(count)d groups for synchronisation.",
+                    len(keycloak_ids),
+                )
+                % {"count": len(keycloak_ids)},
+                messages.INFO,
+            )
+            return
+
+        stats = sync_groups_by_ids(keycloak_ids)
+        self.report_sync(request, stats)
+
+    def run_sync_all(self, request: HttpRequest) -> None:
+        """Mirror the whole tree, pruning groups the realm no longer has."""
+        if CELERY_AVAILABLE:
+            from django_pyoidc_keycloak.tasks import sync_groups_task
+
+            sync_groups_task.delay()
+            self.message_user(request, _("Queued a full group reconciliation."), messages.INFO)
+            return
+        self.report_sync(request, sync_groups())
+
 
     @admin.display(boolean=True, description=_("Keycloak"))
     def managed(self, obj: Any) -> bool:
@@ -361,11 +548,52 @@ class KeycloakGroupAdmin(admin.ModelAdmin):
 
 
 @admin.register(KeycloakRole)
-class KeycloakRoleAdmin(admin.ModelAdmin):
+class KeycloakRoleAdmin(SyncPermissionMixin, admin.ModelAdmin):
+    change_form_template = SYNC_CHANGE_FORM_TEMPLATE
+    change_list_template = SYNC_CHANGE_LIST_TEMPLATE
     list_display = ("__str__", "client_id", "name", "managed", "composite", "assignment_count", "last_synced_at")
     list_filter = ("client_id", "composite", "last_synced_at")
     search_fields = ("name", "client_id", "keycloak_id")
     ordering = ("client_id", "name")
+    actions = ["action_sync_selected"]
+    sync_all_label = _("Reconcile ALL roles from Keycloak")
+
+    @admin.action(description=_("Synchronise selected roles from Keycloak"), permissions=["sync"])
+    def action_sync_selected(self, request: HttpRequest, queryset: Any) -> None:
+        """Refresh the ticked roles only, without pruning the rest."""
+        keycloak_ids = list(queryset.filter(keycloak_id__isnull=False).values_list("keycloak_id", flat=True))
+        if not keycloak_ids:
+            self.message_user(request, _("None of the selected roles are managed by Keycloak."), messages.WARNING)
+            return
+
+        if CELERY_AVAILABLE:
+            from django_pyoidc_keycloak.tasks import sync_selected_roles_task
+
+            sync_selected_roles_task.delay([str(kc_id) for kc_id in keycloak_ids])
+            self.message_user(
+                request,
+                ngettext(
+                    "Queued %(count)d role for synchronisation.",
+                    "Queued %(count)d roles for synchronisation.",
+                    len(keycloak_ids),
+                )
+                % {"count": len(keycloak_ids)},
+                messages.INFO,
+            )
+            return
+
+        stats = sync_roles_by_ids(keycloak_ids)
+        self.report_sync(request, stats)
+
+    def run_sync_all(self, request: HttpRequest) -> None:
+        """Mirror every realm and client role, pruning those the realm no longer has."""
+        if CELERY_AVAILABLE:
+            from django_pyoidc_keycloak.tasks import sync_roles_task
+
+            sync_roles_task.delay()
+            self.message_user(request, _("Queued a full role reconciliation."), messages.INFO)
+            return
+        self.report_sync(request, sync_roles())
 
     @admin.display(boolean=True, description=_("Keycloak"))
     def managed(self, obj: Any) -> bool:

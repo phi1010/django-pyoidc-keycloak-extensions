@@ -84,7 +84,7 @@ jobs:
           import pathlib, zipfile
           wheel = next(pathlib.Path("dist").glob("*.whl"))
           names = zipfile.ZipFile(wheel).namelist()
-          expected = "django_pyoidc_keycloak/templates/admin/keycloak/keycloakuser/change_form.html"
+          expected = "django_pyoidc_keycloak/templates/django_pyoidc_keycloak/change_form.html"
           assert expected in names, f"{expected} missing from {wheel.name}"
           assert any(n.endswith("migrations/0001_initial.py") for n in names), "migrations missing"
           print(f"{wheel.name}: templates and migrations present")

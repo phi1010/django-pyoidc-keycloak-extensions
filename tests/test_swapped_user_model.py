@@ -72,3 +72,33 @@ def test_migrate_applies_cleanly(generated_migrations):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "cannot be resolved" not in result.stderr
     assert "CircularDependencyError" not in result.stderr
+
+
+def test_the_admin_routes_follow_the_swapped_model(generated_migrations):
+    """Regression test: the admin used to hard-code ``admin:keycloak_keycloakuser_*``.
+
+    Under a swapped user model those routes are ``admin:testapp_swapped_user_*``, so the
+    "Sync now" button and every redirect after it raised NoReverseMatch. The change_form
+    template was looked up by app and model too, so it was never found either.
+    """
+    assert generated_migrations.returncode == 0, generated_migrations.stderr
+    probe = (
+        "from django.contrib import admin;"
+        "from django.contrib.auth import get_user_model;"
+        "from django.urls import reverse;"
+        "a=admin.site._registry[get_user_model()];"
+        "print('SYNC', reverse(a.admin_url_name('sync'), args=['1']));"
+        "print('SYNCALL', a.admin_url('sync_all'));"
+        "print('LIST', a.admin_url('changelist'));"
+        "print('TPL', a.change_form_template, a.change_list_template)"
+    )
+
+    result = run_management_command("shell", "-c", probe)
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "SYNC /admin/testapp_swapped/user/1/sync/" in output, output
+    assert "SYNCALL /admin/testapp_swapped/user/sync-all/" in output, output
+    assert "LIST /admin/testapp_swapped/user/" in output, output
+    # A fixed path, not admin/<app>/<model>/..., or it stops resolving when swapped.
+    assert "TPL django_pyoidc_keycloak/change_form.html django_pyoidc_keycloak/change_list.html" in output, output

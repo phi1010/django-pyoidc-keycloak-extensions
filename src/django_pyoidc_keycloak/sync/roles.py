@@ -18,6 +18,7 @@ from django.apps import apps
 from django.utils import timezone
 
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
+from django_pyoidc_keycloak.admin_api.exceptions import KeycloakError, KeycloakNotFound
 from django_pyoidc_keycloak.admin_api.provider import get_connection
 from django_pyoidc_keycloak.conf import app_settings
 from django_pyoidc_keycloak.models import KeycloakRole, RoleAssignment
@@ -138,6 +139,51 @@ def sync_roles(*, client=None, prune: bool = True) -> dict[str, int]:
         counts["created"],
         counts["updated"],
         counts["deleted"],
+    )
+    return counts
+
+
+def sync_roles_by_ids(keycloak_ids: Any, *, client=None) -> dict[str, int]:
+    """Refresh just these roles, leaving the rest alone.
+
+    The per-row counterpart of :func:`sync_roles`, which mirrors and prunes everything. A
+    role the realm no longer has is deleted locally, as a full mirror would have pruned it.
+
+    ``client_id`` is taken from the local row rather than from the representation: a role
+    belongs to its container for life, and ``/roles-by-id`` reports that container as a UUID
+    that would have to be mapped back to a ``clientId`` for no gain.
+    """
+    client = client or get_admin_client()
+    role_model = get_role_model()
+    counts = {"created": 0, "updated": 0, "deleted": 0, "errors": 0}
+
+    for kc_id in keycloak_ids:
+        if kc_id is None:
+            # Locally created roles are not in the realm and are never touched by sync.
+            continue
+        row = role_model.objects.filter(keycloak_id=kc_id).first()
+        if row is None:
+            continue
+        try:
+            representation = client.get_role_by_id(str(kc_id))
+        except KeycloakNotFound:
+            removed, _ = role_model.objects.filter(keycloak_id=kc_id).delete()
+            counts["deleted"] += removed
+            logger.info("Role %s no longer exists in Keycloak; removed locally", kc_id)
+            continue
+        except KeycloakError as exc:
+            counts["errors"] += 1
+            logger.warning("Could not read role %s: %s", kc_id, scrub_exception(exc))
+            continue
+
+        sync_role(representation, client_id=row.client_id)
+        counts["updated"] += 1
+
+    logger.info(
+        "Selected roles synchronised: %d updated, %d removed, %d error(s)",
+        counts["updated"],
+        counts["deleted"],
+        counts["errors"],
     )
     return counts
 

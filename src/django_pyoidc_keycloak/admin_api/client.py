@@ -287,6 +287,14 @@ class KeycloakAdminClient:
     def list_realm_roles(self) -> list[dict[str, Any]]:
         return list(self.get_json("/roles", params={"briefRepresentation": False}))
 
+    def get_role_by_id(self, role_id: str) -> dict[str, Any]:
+        """One role by its UUID, realm or client alike. Raises KeycloakNotFound when gone.
+
+        ``/roles-by-id`` is the only endpoint that finds a role without already knowing which
+        container it belongs to.
+        """
+        return self.get_json(f"/roles-by-id/{role_id}")
+
     def find_client(self, client_id: str) -> dict[str, Any] | None:
         """The client representation for a ``clientId``, or None. Needs ``view-clients``."""
         matches = list(self.get_json("/clients", params={"clientId": client_id}))

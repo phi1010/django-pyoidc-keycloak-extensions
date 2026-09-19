@@ -267,11 +267,30 @@ def test_an_assignment_added_by_hand_becomes_a_manual_override():
     assert assignment.created_by == user
 
 
-def test_the_user_admin_offers_the_sync_actions():
+def test_the_user_admin_offers_the_sync_action():
     user_admin = admin.site._registry[KeycloakUser]
 
     assert "action_sync_selected" in user_admin.actions
-    assert "action_sync_all" in user_admin.actions
+
+
+def test_sync_all_is_a_button_not_a_dropdown_action():
+    """Actions only ever run against a selection, so "ALL" made no sense as one.
+
+    It asked you to tick a row and then ignored it.
+    """
+    user_admin = admin.site._registry[KeycloakUser]
+
+    assert "action_sync_all" not in (user_admin.actions or ())
+    assert not hasattr(user_admin, "action_sync_all")
+    assert user_admin.admin_url("sync_all") == "/admin/keycloak/keycloakuser/sync-all/"
+
+
+@pytest.mark.parametrize("model", [KeycloakGroup, KeycloakRole])
+def test_groups_and_roles_can_be_synchronised_too(model):
+    model_admin = admin.site._registry[model]
+
+    assert "action_sync_selected" in model_admin.actions
+    assert model_admin.admin_url("sync_all").endswith("/sync-all/")
 
 
 # -- the admin actually renders -----------------------------------------
@@ -429,7 +448,6 @@ def test_the_sync_actions_are_offered_with_the_verb(staff):
     actions = user_admin.get_actions(request)
 
     assert "action_sync_selected" in actions
-    assert "action_sync_all" in actions
 
 
 def test_a_forged_sync_action_does_not_run_without_the_verb(client, staff, monkeypatch):
@@ -470,3 +488,184 @@ def test_the_sync_button_is_shown_with_the_verb(client, staff):
 
     assert response.status_code == 200
     assert b"Sync now from Keycloak" in response.content
+
+
+# -- "synchronise everything" is a changelist button --------------------
+
+
+SYNC_GROUP = "keycloak.sync_keycloakgroup"
+SYNC_ROLE = "keycloak.sync_keycloakrole"
+
+
+def test_the_sync_all_button_is_shown_with_the_verb(client, staff):
+    StubPolicyBackend.policy = {SYNC: {"staff"}, VIEW: {"staff"}}
+    client.force_login(staff)
+
+    response = client.get("/admin/keycloak/keycloakuser/")
+
+    assert b"/admin/keycloak/keycloakuser/sync-all/" in response.content
+
+
+def test_the_sync_all_button_is_hidden_without_the_verb(client, staff):
+    StubPolicyBackend.policy = {VIEW: {"staff"}}
+    client.force_login(staff)
+
+    response = client.get("/admin/keycloak/keycloakuser/")
+
+    assert response.status_code == 200
+    assert b"/admin/keycloak/keycloakuser/sync-all/" not in response.content
+
+
+def test_sync_all_refuses_a_get(client, staff, monkeypatch):
+    """POST-only: it changes state, and Django does not CSRF-protect GET."""
+    StubPolicyBackend.policy = {SYNC: {"staff"}, VIEW: {"staff"}}
+    client.force_login(staff)
+
+    response = client.get("/admin/keycloak/keycloakuser/sync-all/")
+
+    assert response.status_code == 405
+
+
+def test_sync_all_is_refused_without_the_verb(client, staff, monkeypatch):
+    called = []
+    monkeypatch.setattr(KeycloakUserAdmin, "run_sync_all", lambda self, request: called.append(request))
+    StubPolicyBackend.policy = {CHANGE: {"staff"}, VIEW: {"staff"}}
+    client.force_login(staff)
+
+    response = client.post("/admin/keycloak/keycloakuser/sync-all/")
+
+    assert response.status_code == 403
+    assert called == []
+
+
+def test_sync_all_runs_with_the_verb(client, staff, monkeypatch):
+    called = []
+    monkeypatch.setattr(KeycloakUserAdmin, "run_sync_all", lambda self, request: called.append(request))
+    StubPolicyBackend.policy = {SYNC: {"staff"}, VIEW: {"staff"}}
+    client.force_login(staff)
+
+    response = client.post("/admin/keycloak/keycloakuser/sync-all/")
+
+    assert response.status_code == 302
+    assert len(called) == 1
+
+
+@pytest.mark.parametrize(
+    ("model", "url", "verb"),
+    [
+        (KeycloakGroup, "/admin/keycloak/keycloakgroup/", SYNC_GROUP),
+        (KeycloakRole, "/admin/keycloak/keycloakrole/", SYNC_ROLE),
+    ],
+)
+def test_groups_and_roles_offer_the_sync_all_button(client, staff, model, url, verb):
+    StubPolicyBackend.policy = {verb: {"staff"}, f"keycloak.view_{model._meta.model_name}": {"staff"}}
+    client.force_login(staff)
+
+    response = client.get(url)
+
+    assert response.status_code == 200
+    assert f"{url}sync-all/".encode() in response.content
+
+
+# -- the realm-wide reconcile button ------------------------------------
+
+
+#: The sync verb on all three models, plus the view verb needed to open each changelist.
+ALL_SYNC_VERBS = {
+    SYNC: {"staff"},
+    SYNC_GROUP: {"staff"},
+    SYNC_ROLE: {"staff"},
+    VIEW: {"staff"},
+    "keycloak.view_keycloakgroup": {"staff"},
+    "keycloak.view_keycloakrole": {"staff"},
+}
+
+
+@pytest.fixture
+def without_celery(monkeypatch):
+    """Force the inline branch. Celery is installed here, so the admin would enqueue."""
+    monkeypatch.setattr("django_pyoidc_keycloak.admin.CELERY_AVAILABLE", False)
+
+
+def test_reconcile_is_offered_with_every_sync_verb(client, staff):
+    StubPolicyBackend.policy = ALL_SYNC_VERBS
+    client.force_login(staff)
+
+    response = client.get("/admin/keycloak/keycloakuser/")
+
+    assert b"/admin/keycloak/keycloakuser/reconcile/" in response.content
+
+
+def test_reconcile_needs_the_verb_on_users_groups_and_roles(client, staff, monkeypatch, without_celery):
+    """It rewrites all three, so holding one verb must not be enough.
+
+    Otherwise someone with only sync_keycloakgroup could start a pass that deletes and
+    anonymises user accounts.
+    """
+    called = []
+    monkeypatch.setattr("django_pyoidc_keycloak.admin.full_reconcile", lambda: called.append(True) or {})
+    StubPolicyBackend.policy = {SYNC_GROUP: {"staff"}, VIEW: {"staff"}}
+    client.force_login(staff)
+
+    listing = client.get("/admin/keycloak/keycloakgroup/")
+    response = client.post("/admin/keycloak/keycloakgroup/reconcile/")
+
+    assert b"/admin/keycloak/keycloakgroup/reconcile/" not in listing.content
+    assert response.status_code == 403
+    assert called == []
+
+
+def test_reconcile_refuses_a_get(client, staff):
+    StubPolicyBackend.policy = ALL_SYNC_VERBS
+    client.force_login(staff)
+
+    response = client.get("/admin/keycloak/keycloakuser/reconcile/")
+
+    assert response.status_code == 405
+
+
+def test_reconcile_runs_a_full_pass(client, staff, monkeypatch, without_celery):
+    """Unlike "synchronise everything", this imports and removes -- see full_reconcile."""
+    called = []
+    stats = {"created": 1, "updated": 2, "deleted": 0, "anonymized": 0, "skipped": 3}
+    monkeypatch.setattr(
+        "django_pyoidc_keycloak.admin.full_reconcile", lambda: called.append(True) or stats
+    )
+    StubPolicyBackend.policy = ALL_SYNC_VERBS
+    client.force_login(staff)
+
+    response = client.post("/admin/keycloak/keycloakuser/reconcile/")
+
+    assert response.status_code == 302
+    assert called == [True]
+
+
+def test_reconcile_enqueues_when_celery_is_available(client, staff, monkeypatch):
+    """With a worker to take it, the request does not block on a whole-realm pass."""
+    queued = []
+    monkeypatch.setattr("django_pyoidc_keycloak.admin.CELERY_AVAILABLE", True)
+    monkeypatch.setattr(
+        "django_pyoidc_keycloak.tasks.reconcile_task.delay", lambda *a, **kw: queued.append((a, kw))
+    )
+    monkeypatch.setattr(
+        "django_pyoidc_keycloak.admin.full_reconcile", lambda: pytest.fail("should have enqueued")
+    )
+    StubPolicyBackend.policy = ALL_SYNC_VERBS
+    client.force_login(staff)
+
+    response = client.post("/admin/keycloak/keycloakuser/reconcile/")
+
+    assert response.status_code == 302
+    assert len(queued) == 1
+
+
+@pytest.mark.parametrize("url", ["keycloakuser", "keycloakgroup", "keycloakrole"])
+def test_reconcile_is_reachable_from_every_changelist(client, staff, url):
+    """It is realm-wide, so it is offered wherever you happen to be."""
+    StubPolicyBackend.policy = ALL_SYNC_VERBS
+    client.force_login(staff)
+
+    response = client.get(f"/admin/keycloak/{url}/")
+
+    assert response.status_code == 200
+    assert f"/admin/keycloak/{url}/reconcile/".encode() in response.content

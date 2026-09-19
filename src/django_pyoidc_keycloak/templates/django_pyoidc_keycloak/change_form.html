@@ -1,3 +1,5 @@
+{# Not under admin/<app>/<model>/: that path stops resolving as soon as a project swaps
+   AUTH_USER_MODEL into an app of its own. The ModelAdmin names this file explicitly. #}
 {% extends "admin/change_form.html" %}
 {% load i18n %}
 

@@ -15,6 +15,7 @@ from django.apps import apps
 from django.utils import timezone
 
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
+from django_pyoidc_keycloak.admin_api.exceptions import KeycloakError, KeycloakNotFound
 from django_pyoidc_keycloak.conf import app_settings
 from django_pyoidc_keycloak.models import GroupMembership, KeycloakGroup
 from django_pyoidc_keycloak.models.base import MembershipSource
@@ -116,6 +117,63 @@ def sync_groups(*, client=None, prune: bool = True) -> dict[str, int]:
         counts["created"],
         counts["updated"],
         counts["deleted"],
+    )
+    return counts
+
+
+def _parent_for(representation: dict[str, Any]) -> Any:
+    """The local row for this group's parent, found by path.
+
+    ``sync_groups`` knows the parent because it walks down from the root; a single group
+    fetched by id does not, and its ``parent`` must not be cleared -- that would flatten the
+    tree. Keycloak's ``path`` carries the answer: the parent of ``/a/b`` is ``/a``, and a
+    top-level group has none. Resolving by path also means a group moved in Keycloak lands
+    under its new parent here.
+    """
+    group_model = get_group_model()
+    parent_path = (representation.get("path") or "").rsplit("/", 1)[0]
+    if not parent_path:
+        return None
+    return group_model.objects.filter(path=parent_path).first()
+
+
+def sync_groups_by_ids(keycloak_ids: Any, *, client=None) -> dict[str, int]:
+    """Refresh just these groups, leaving the rest of the tree alone.
+
+    The per-row counterpart of :func:`sync_groups`, which walks and prunes everything. A
+    group the realm no longer has is deleted locally, exactly as a full mirror would have
+    pruned it; anything else that fails is counted and the remaining groups still run.
+    """
+    client = client or get_admin_client()
+    group_model = get_group_model()
+    counts = {"created": 0, "updated": 0, "deleted": 0, "errors": 0}
+
+    for kc_id in keycloak_ids:
+        if kc_id is None:
+            # Locally created groups are not in the realm and are never touched by sync.
+            continue
+        try:
+            representation = client.get_group(str(kc_id))
+        except KeycloakNotFound:
+            removed, _ = group_model.objects.filter(keycloak_id=kc_id).delete()
+            counts["deleted"] += removed
+            logger.info("Group %s no longer exists in Keycloak; removed locally", kc_id)
+            continue
+        except KeycloakError as exc:
+            counts["errors"] += 1
+            logger.warning("Could not read group %s: %s", kc_id, scrub_exception(exc))
+            continue
+
+        existed = group_model.objects.filter(keycloak_id=kc_id).exists()
+        sync_group(representation, parent=_parent_for(representation))
+        counts["updated" if existed else "created"] += 1
+
+    logger.info(
+        "Selected groups synchronised: %d created, %d updated, %d removed, %d error(s)",
+        counts["created"],
+        counts["updated"],
+        counts["deleted"],
+        counts["errors"],
     )
     return counts
 
