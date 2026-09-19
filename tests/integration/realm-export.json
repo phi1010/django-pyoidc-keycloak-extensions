@@ -55,6 +55,36 @@
             "id.token.claim": "false",
             "access.token.claim": "true"
           }
+        },
+        {
+          "name": "client roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "resource_access.${client_id}.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
         }
       ]
     },
@@ -110,6 +140,9 @@
       "clientRoles": {
         "reports-api": [
           "reader"
+        ],
+        "django-app": [
+          "feature1-viewer"
         ]
       }
     },
@@ -128,7 +161,13 @@
       ],
       "groups": [
         "/contractors"
-      ]
+      ],
+      "clientRoles": {
+        "django-app": [
+          "feature1-viewer",
+          "feature1-editor"
+        ]
+      }
     },
     {
       "username": "carol",
@@ -145,6 +184,35 @@
       ]
     },
     {
+      "username": "admin",
+      "enabled": true,
+      "email": "admin@example.org",
+      "emailVerified": true,
+      "firstName": "Admin",
+      "lastName": "Example",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "app-admin"
+      ],
+      "groups": [
+        "/staff"
+      ],
+      "clientRoles": {
+        "django-app": [
+          "app-staff",
+          "app-superuser",
+          "feature1-viewer",
+          "feature1-editor"
+        ]
+      }
+    },
+    {
       "username": "service-account-django-app",
       "enabled": true,
       "serviceAccountClientId": "django-app",
@@ -155,6 +223,7 @@
           "query-groups",
           "view-events",
           "view-realm",
+          "view-clients",
           "manage-users",
           "manage-events"
         ]
@@ -164,10 +233,8 @@
   "roles": {
     "realm": [
       {
-        "name": "app-staff"
-      },
-      {
-        "name": "app-admin"
+        "name": "app-admin",
+        "description": "A realm role, mirrored but mapped to nothing."
       }
     ],
     "client": {
@@ -175,6 +242,24 @@
         {
           "name": "reader",
           "description": "Lets a user's token be exchanged for this audience."
+        }
+      ],
+      "django-app": [
+        {
+          "name": "app-staff",
+          "description": "Maps to is_staff"
+        },
+        {
+          "name": "app-superuser",
+          "description": "Maps to is_superuser"
+        },
+        {
+          "name": "feature1-viewer",
+          "description": "May read app_for_feature1 objects"
+        },
+        {
+          "name": "feature1-editor",
+          "description": "May change app_for_feature1 objects"
         }
       ]
     }

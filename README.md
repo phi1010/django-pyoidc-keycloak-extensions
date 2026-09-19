@@ -1,6 +1,6 @@
 # django-pyoidc-keycloak-extensions
 
-Keycloak user and group synchronisation, encrypted token storage and RFC 8693 token exchange
+Keycloak user, group and role synchronisation, encrypted token storage and RFC 8693 token exchange
 for Django projects that authenticate through
 [django-pyoidc](https://pypi.org/project/django-pyoidc/).
 
@@ -11,7 +11,10 @@ needs when Keycloak is the system of record:
 * **Users stay in step with Keycloak** — renames, disables and deletions arrive through
   event polling, with full reconciliation as the correctness backstop.
 * **Deleted accounts are removed, or anonymised** when local data still references them.
-* **Groups mirror Keycloak**, with temporary manual overrides an admin can grant.
+* **Groups and roles mirror Keycloak**, with temporary manual overrides an admin can grant.
+  Realm roles and the OIDC client's roles are stored locally; `is_staff` and `is_superuser`
+  are derived from client roles.
+* **Login applies the ID token immediately**, unless a reconcile has produced newer data.
 * **Permissions are never stored locally.** Every `has_perm` goes to your own authorization
   backend (Open Policy Agent, or whatever you use).
 * **Raw tokens are stored encrypted**, refreshed lazily, and exchangeable for another audience.
@@ -41,11 +44,25 @@ separate service account to create. On that client:
 1. **Client authentication: on** (it must be confidential).
 2. **Service accounts roles: on.**
 3. On the service-account user, assign these `realm-management` roles:
-   `view-users`, `query-users`, `query-groups`, `view-events`, `view-realm`.
+   `view-users`, `query-users`, `query-groups`, `view-events`, `view-realm`, `view-clients`.
 4. In *Realm settings → Sessions/Events*, enable **admin events** and **user events** — event
    polling reads both, and neither is on by default.
 5. For token exchange: switch on **Standard token exchange** on the client, and make sure the
    user holds a role on the target client so that audience is within your client's scope.
+6. Create the client roles `app-staff` and `app-superuser` on the client (or change
+   `STAFF_ROLES` / `SUPERUSER_ROLES`), plus whatever roles your policy reads.
+7. Add three protocol mappers to the client so login can read membership and roles from the
+   ID token without an Admin API call. Keycloak's default `roles` scope only puts roles in the
+   access token; these copy them into the ID token and userinfo as well:
+
+   | Mapper type | Claim | Setting |
+   | --- | --- | --- |
+   | Group Membership | `groups` | Full group path: on |
+   | User Client Role | `resource_access.${client_id}.roles` | Multivalued: on |
+   | User Realm Role | `realm_access.roles` | Multivalued: on |
+
+   Enable *Add to ID token*, *Add to access token* and *Add to userinfo* on each. The exact
+   JSON is in `tests/integration/realm-export.json`.
 
 > This grants the browser-facing login client read access to the realm's user directory. A
 > leaked client secret therefore exposes more than it would with a separate admin client — an
@@ -177,7 +194,7 @@ passwords never reach a log record: HTTP response bodies are passed through `scr
 they are rendered, and request payloads are never logged at all. Accounts are identified by
 `keycloak_id` and local primary key, never by username, email or name; a Keycloak
 representation is logged as its list of *keys*, and a change as its list of *field names*.
-Group paths are logged, since they are realm configuration rather than user data.
+Group paths and role names are logged, since they are realm configuration rather than user data.
 
 `tests/test_logging.py` enforces this with sentinel values, so it stays true.
 
@@ -186,7 +203,7 @@ Group paths are logged, since they are realm configuration rather than user data
 ```cron
 */2 *  * * *  manage.py keycloak_sync_events    # incremental
 17  *  * * *  manage.py keycloak_reconcile      # the correctness backstop
-30  3  * * *  manage.py keycloak_purge_tokens   # expired tokens and memberships
+30  3  * * *  manage.py keycloak_purge_tokens   # expired tokens, memberships and role assignments
 ```
 
 Both are needed. Admin events only cover changes made through the Admin API or console;
@@ -230,6 +247,52 @@ never release the next worker's. This is why django-redis is a mandatory depende
 `CACHES["default"]` must point at `django_redis.cache.RedisCache`; a system check
 (`keycloak.E008`) enforces it at start-up.
 
+## Groups and roles
+
+Keycloak's group tree, its realm roles and the roles of your OIDC client are mirrored into
+`KeycloakGroup` and `KeycloakRole`, and a user's membership and assignments into the
+`GroupMembership` and `RoleAssignment` through models. Both through models carry a `source`:
+`keycloak` rows are added and removed by synchronisation to match the realm exactly, `manual`
+rows are an admin override that survives synchronisation until `expires_at` passes.
+
+```python
+request.user.active_groups()                       # unexpired memberships
+request.user.active_roles()                        # unexpired assignments
+request.user.has_role("feature1-editor", "django-app")
+request.user.has_role("app-admin")                 # client_id="" is a realm role
+```
+
+Roles are stored *effective*: composites are expanded, both when read from the Admin API and
+in tokens, so the two paths agree. Other clients' roles are ignored unless you list them in
+`KEYCLOAK["ROLE_CLIENTS"]`; Keycloak's built-in `realm-management`, `account` and `broker`
+roles never reach the local table by default.
+
+`is_staff` and `is_superuser` are derived from role references in `STAFF_ROLES` and
+`SUPERUSER_ROLES`. A bare name is a role on the OIDC client, `realm:name` a realm role, and
+`other-client:name` a role on a client that is also in `ROLE_CLIENTS`. The defaults are the
+client roles `app-staff` and `app-superuser`. An empty list leaves that flag for you to manage
+by hand.
+
+### Login versus reconcile
+
+At login the `groups`, `realm_access` and `resource_access` claims are applied immediately,
+so a user sees a change in Keycloak on their next sign-in without waiting for a sync. But a
+token is only as fresh as its `iat`, and a reconcile or event poll may have run since. The user
+row records `authorization_synced_at`: Admin API synchronisation stamps it with the read time,
+a login stamps it with the token's `iat`, and a login whose token predates the stamp leaves
+groups, roles and the staff flags alone. A claim that is missing altogether falls back to the
+Admin API for that kind of data; a present-but-empty claim means "no roles".
+
+### Your own model base
+
+Every domain model (user, group, membership, role, assignment) inherits from the abstract
+model named by `KEYCLOAK_MODEL_BASE`, which supplies the UUID primary key and `created_at` /
+`updated_at`. Point it at your own abstract model to add soft deletion, history or a manager
+to all of them at once. If your base adds *fields*, you must also subclass the abstract models
+in your own app, point `AUTH_USER_MODEL` and the `KEYCLOAK_*_MODEL` settings at them and own
+their migrations; system check `keycloak.E009` refuses to start otherwise, because the
+library's migrations know nothing about your columns.
+
 ## Settings
 
 | Setting | Default | Meaning |
@@ -240,14 +303,24 @@ never release the next worker's. This is why django-redis is a mandatory depende
 | `IMPORT_ALL_USERS` | `False` | Create local users for accounts that never logged in. |
 | `SYNC_ON_LOGIN` | `True` | Refresh the user from claims at each login. |
 | `SYNC_GROUPS` | `True` | Mirror group membership. |
+| `SYNC_ROLES` | `True` | Mirror realm and client roles and their assignments. |
+| `ROLE_CLIENTS` | the OIDC client | Which clients' roles are mirrored, by `clientId`. Realm roles always are. |
 | `USERNAME_STRATEGY` | built-in | Dotted path to your own username derivation. |
-| `STAFF_ROLES` / `SUPERUSER_ROLES` | `[]` | Realm roles that map to `is_staff` / `is_superuser`. |
+| `STAFF_ROLES` / `SUPERUSER_ROLES` | `["app-staff"]` / `["app-superuser"]` | Role references that map to `is_staff` / `is_superuser`: a bare name is a client role on the OIDC client, `realm:name` a realm role. **Changed in 0.3:** realm roles now need the `realm:` prefix. |
 | `CREATE_DJANGO_PERMISSIONS` | `False` | Let Django populate `auth_permission` again. |
 | `STORE_TOKENS` | `True` | Store raw tokens at login. |
 | `REQUEST_OFFLINE_ACCESS` | `False` | Request `offline_access` scope. |
 | `TOKEN_EXCHANGE_ENABLED` | `False` | Enables token exchange; the call refuses while off. |
 | `ADMIN_BULK_INLINE_LIMIT` | `50` | Cap on synchronising inline from the admin without Celery. |
 | `EVENT_OVERLAP_SECONDS` | `300` | How far back each event poll re-reads. |
+
+Top-level Django settings, not under `KEYCLOAK`:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `KEYCLOAK_GROUP_MODEL` / `KEYCLOAK_MEMBERSHIP_MODEL` | `keycloak.KeycloakGroup` / `keycloak.GroupMembership` | Swap in your own concrete models. |
+| `KEYCLOAK_ROLE_MODEL` / `KEYCLOAK_ROLE_ASSIGNMENT_MODEL` | `keycloak.KeycloakRole` / `keycloak.RoleAssignment` | Likewise for roles. |
+| `KEYCLOAK_MODEL_BASE` | `django_pyoidc_keycloak.models.base.KeycloakModelBase` | Abstract base of every domain model (see above). |
 
 ## Security notes
 
@@ -257,10 +330,12 @@ anyone who can write to that cache can execute code in your process on the next 
 not point `CACHES["default"]` at a Redis or memcached instance shared with less-trusted
 components, and keep it authenticated and network-isolated.
 
-**Group mappers must derive from actual group membership.** At login, membership is read from
-the `groups` claim when present. This library only ever grants membership in groups Keycloak
-owns — a locally created group can never be reached through a claim — but if you configure
-the mapper over a user-editable attribute, a user controls their own claim content.
+**Group and role mappers must derive from actual membership and role mappings.** At login,
+membership and roles are read from the `groups`, `realm_access` and `resource_access` claims
+when present, and `is_staff` / `is_superuser` follow. This library only ever grants groups
+and roles Keycloak owns — a locally created group or role can never be reached through a
+claim — but if you configure a mapper over a user-editable attribute, a user controls their
+own claim content, and with it the staff flags.
 
 **Token encryption uses PBKDF2-SHA256 at 100 000 iterations**, which is what
 `django-fernet-encrypted-fields` does and is below OWASP's current 600k guidance. Session

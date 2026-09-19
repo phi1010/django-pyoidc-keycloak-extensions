@@ -78,6 +78,15 @@ class KeycloakAuthorizationMixin(models.Model):
         verbose_name=_("groups"),
         help_text=_("Group membership, mirrored from Keycloak. Grants no permission by itself."),
     )
+    roles = models.ManyToManyField(
+        app_settings.role_model,
+        through=app_settings.role_assignment_model,
+        through_fields=("user", "role"),
+        related_name="users",
+        blank=True,
+        verbose_name=_("roles"),
+        help_text=_("Realm and client roles, mirrored from Keycloak. Grants no permission by itself."),
+    )
 
     class Meta:
         abstract = True
@@ -121,3 +130,14 @@ class KeycloakAuthorizationMixin(models.Model):
             Q(memberships__expires_at__isnull=True) | Q(memberships__expires_at__gt=timezone.now()),
             memberships__user=self,
         ).distinct()
+
+    def active_roles(self) -> models.QuerySet:
+        """Roles whose assignment has not expired."""
+        return self.roles.filter(
+            Q(assignments__expires_at__isnull=True) | Q(assignments__expires_at__gt=timezone.now()),
+            assignments__user=self,
+        ).distinct()
+
+    def has_role(self, name: str, client_id: str = "") -> bool:
+        """Whether an unexpired assignment grants this role. ``client_id=""`` means a realm role."""
+        return self.active_roles().filter(name=name, client_id=client_id).exists()

@@ -1,6 +1,6 @@
 [project]
 name = "django-pyoidc-keycloak-extensions"
-version = "0.2.4"
+version = "0.3.0"
 description = "Keycloak user/group synchronisation, encrypted token storage and token exchange for django-pyoidc"
 readme = "README.md"
 requires-python = ">=3.14"

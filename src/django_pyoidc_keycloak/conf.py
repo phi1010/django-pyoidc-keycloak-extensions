@@ -11,6 +11,9 @@ from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.utils.module_loading import import_string
+
+DEFAULT_MODEL_BASE = "django_pyoidc_keycloak.models.base.KeycloakModelBase"
 
 DEFAULTS: dict[str, Any] = {
     # Connection. Empty means "take it from the django-pyoidc provider config".
@@ -24,8 +27,13 @@ DEFAULTS: dict[str, Any] = {
     "SYNC_ON_LOGIN": True,
     "SYNC_GROUPS": True,
     "USERNAME_STRATEGY": "django_pyoidc_keycloak.sync.usernames.derive_username",
-    "STAFF_ROLES": [],
-    "SUPERUSER_ROLES": [],
+    "SYNC_ROLES": True,
+    # Which clients' roles are mirrored. None means "the OIDC client only".
+    "ROLE_CLIENTS": None,
+    # Role references: a bare name is a role on the OIDC client, "realm:name" a realm role,
+    # "other-client:name" a role on another client listed in ROLE_CLIENTS.
+    "STAFF_ROLES": ["app-staff"],
+    "SUPERUSER_ROLES": ["app-superuser"],
     "EVENT_OVERLAP_SECONDS": 300,
     "EVENT_PAGE_SIZE": 100,
     "USER_PAGE_SIZE": 100,
@@ -81,6 +89,32 @@ class AppSettings:
     @property
     def membership_model(self) -> str:
         return getattr(settings, "KEYCLOAK_MEMBERSHIP_MODEL", "keycloak.GroupMembership")
+
+    @property
+    def role_model(self) -> str:
+        return getattr(settings, "KEYCLOAK_ROLE_MODEL", "keycloak.KeycloakRole")
+
+    @property
+    def role_assignment_model(self) -> str:
+        return getattr(settings, "KEYCLOAK_ROLE_ASSIGNMENT_MODEL", "keycloak.RoleAssignment")
+
+    @property
+    def model_base(self) -> str:
+        """Dotted path of the abstract model every domain model inherits from.
+
+        It defines the primary key and the ``created_at`` / ``updated_at`` columns.  A project
+        may point it at its own abstract model (soft delete, history, ...); if that base adds
+        fields, the project must also swap the concrete models and own their migrations.
+        """
+        return getattr(settings, "KEYCLOAK_MODEL_BASE", DEFAULT_MODEL_BASE)
+
+    def resolve_model_base(self) -> type:
+        base = import_string(self.model_base)
+        meta = getattr(base, "_meta", None)
+        if meta is None or not meta.abstract:
+            msg = f"KEYCLOAK_MODEL_BASE {self.model_base!r} must be an abstract Django model."
+            raise ImproperlyConfigured(msg)
+        return base
 
 
 app_settings = AppSettings()

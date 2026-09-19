@@ -25,6 +25,10 @@ def client_stub(connection):
     stub.connection = connection
     stub.get_user_groups.return_value = []
     stub.get_user_realm_roles.return_value = []
+    stub.get_user_client_roles.return_value = []
+    stub.list_realm_roles.return_value = []
+    stub.list_client_roles.return_value = []
+    stub.find_client.return_value = None
     stub.list_groups.return_value = []
     stub.iter_users.return_value = iter([])
     return stub

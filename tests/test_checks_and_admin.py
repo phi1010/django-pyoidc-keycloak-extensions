@@ -12,10 +12,19 @@ from django_pyoidc_keycloak.checks import (
     check_authentication_backends,
     check_cache_backend,
     check_encryption_key,
+    check_model_base,
+    check_role_references,
     check_token_exchange,
     check_user_model,
 )
-from django_pyoidc_keycloak.models import GroupMembership, KeycloakGroup, KeycloakUser, SyncRun
+from django_pyoidc_keycloak.models import (
+    GroupMembership,
+    KeycloakGroup,
+    KeycloakRole,
+    KeycloakUser,
+    RoleAssignment,
+    SyncRun,
+)
 from django_pyoidc_keycloak.models.base import MembershipSource
 from tests.testproject.backend import StubPolicyBackend
 
@@ -127,6 +136,48 @@ def test_no_cache_check_when_tokens_are_not_stored(settings):
     assert check_cache_backend(None) == []
 
 
+def test_the_default_model_base_passes():
+    assert check_model_base(None) == []
+
+
+def test_a_model_base_with_extra_fields_needs_swapped_models(monkeypatch):
+    """The library's migrations cannot know about columns a custom base adds."""
+    from django.db import models
+
+    from django_pyoidc_keycloak.models import base
+
+    class SoftDeleteBase(models.Model):
+        deleted_at = models.DateTimeField(null=True)
+
+        class Meta:
+            abstract = True
+            app_label = "tests"
+
+    monkeypatch.setattr(base, "ModelBase", SoftDeleteBase)
+
+    ids = [problem.id for problem in check_model_base(None)]
+
+    assert "keycloak.E009" in ids
+
+
+def test_the_default_role_references_pass():
+    assert check_role_references(None) == []
+
+
+def test_a_role_reference_to_an_unmirrored_client_is_rejected(settings):
+    settings.KEYCLOAK = {**settings.KEYCLOAK, "STAFF_ROLES": ["reports-api:admin"]}
+
+    ids = [problem.id for problem in check_role_references(None)]
+
+    assert "keycloak.E010" in ids
+
+
+def test_a_realm_role_reference_is_always_fine(settings):
+    settings.KEYCLOAK = {**settings.KEYCLOAK, "STAFF_ROLES": ["realm:app-staff"]}
+
+    assert check_role_references(None) == []
+
+
 # -- admin --------------------------------------------------------------
 
 
@@ -137,6 +188,8 @@ def test_native_django_groups_are_gone_from_the_admin():
 def test_the_keycloak_models_are_registered():
     assert KeycloakUser in admin.site._registry
     assert KeycloakGroup in admin.site._registry
+    assert KeycloakRole in admin.site._registry
+    assert RoleAssignment in admin.site._registry
     assert SyncRun in admin.site._registry
 
 
@@ -199,6 +252,21 @@ def test_a_membership_added_by_hand_becomes_a_manual_override():
     assert membership.created_by == user
 
 
+def test_an_assignment_added_by_hand_becomes_a_manual_override():
+    assignment_admin = admin.site._registry[RoleAssignment]
+    user = KeycloakUser.objects.create_user(username="alice")
+    role = KeycloakRole.objects.create(name="feature1-viewer", client_id="django-app")
+    request = RequestFactory().get("/")
+    request.user = user
+    assignment = RoleAssignment(user=user, role=role)
+
+    assignment_admin.save_model(request, assignment, None, change=False)
+
+    assignment.refresh_from_db()
+    assert assignment.source == MembershipSource.MANUAL
+    assert assignment.created_by == user
+
+
 def test_the_user_admin_offers_the_sync_actions():
     user_admin = admin.site._registry[KeycloakUser]
 
@@ -238,6 +306,15 @@ def test_the_group_and_membership_pages_render(admin_browser):
 
     assert admin_browser.get("/admin/keycloak/keycloakgroup/").status_code == 200
     assert admin_browser.get("/admin/keycloak/groupmembership/").status_code == 200
+
+
+def test_the_role_and_assignment_pages_render(admin_browser):
+    role = KeycloakRole.objects.create(name="feature1-viewer", client_id="django-app")
+    RoleAssignment.objects.create(user=KeycloakUser.objects.get(username="root"), role=role)
+
+    assert admin_browser.get("/admin/keycloak/keycloakrole/").status_code == 200
+    assert admin_browser.get(f"/admin/keycloak/keycloakrole/{role.pk}/change/").status_code == 200
+    assert admin_browser.get("/admin/keycloak/roleassignment/").status_code == 200
 
 
 def test_the_sync_run_page_renders(admin_browser):

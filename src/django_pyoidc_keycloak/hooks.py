@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from django.contrib.auth import get_user_model
@@ -103,8 +104,7 @@ def get_user(client: Any, tokens: dict[str, Any]) -> Any:
     if created:
         user_created.send(sender=user_model, user=user, representation={"id": str(sub)})
 
-    if app_settings.SYNC_GROUPS:
-        _sync_groups_from_login(user, tokens, client)
+    _sync_authorization_from_login(user, tokens, client)
 
     # Keep the raw tokens until hook_user_login can attach them to the session row.
     if app_settings.STORE_TOKENS:
@@ -115,22 +115,90 @@ def get_user(client: Any, tokens: dict[str, Any]) -> Any:
     return user
 
 
-def _sync_groups_from_login(user: Any, tokens: dict[str, Any], client: Any) -> None:
-    """Prefer a ``groups`` claim; fall back to the Admin API only if there is none."""
-    from django_pyoidc_keycloak.sync.groups import apply_group_paths, sync_user_groups
-
-    claim = _claim(tokens, "groups")
+def _issued_at(tokens: dict[str, Any]) -> datetime | None:
+    """When the token was issued, from its ``iat`` claim."""
+    raw = _claim(tokens, "iat")
+    if raw is None:
+        return None
     try:
-        if claim:
-            paths = [str(entry) if str(entry).startswith("/") else f"/{entry}" for entry in claim]
-            logger.debug("Applying group membership from the 'groups' claim for %s", user.pk)
-            apply_group_paths(user, paths)
+        return datetime.fromtimestamp(int(raw), tz=UTC)
+    except TypeError, ValueError, OverflowError, OSError:
+        return None
+
+
+def _sync_authorization_from_login(user: Any, tokens: dict[str, Any], client: Any) -> None:
+    """Groups, roles and the staff flags from the claims, unless reconciled data is newer.
+
+    Each kind prefers its claim and falls back to the Admin API only when the claim is
+    absent altogether.  The stamp written afterwards is the token's ``iat``, not now: the
+    data is only as fresh as the token, and a reconcile that ran in between must win.
+    """
+    from django_pyoidc_keycloak.sync.groups import apply_group_paths, sync_user_groups
+    from django_pyoidc_keycloak.sync.roles import (
+        REALM,
+        apply_flag_roles,
+        apply_role_names,
+        read_user_roles,
+        role_clients,
+    )
+
+    issued_at = _issued_at(tokens)
+    synced_at = user.authorization_synced_at
+    if issued_at is not None and synced_at is not None and synced_at > issued_at:
+        logger.debug(
+            "Authorization data for %s was synchronised at %s, after this token was issued at %s; keeping it",
+            user.pk,
+            synced_at.isoformat(),
+            issued_at.isoformat(),
+        )
+        return
+
+    try:
+        if app_settings.SYNC_GROUPS:
+            _sync_groups_from_claims(user, tokens, apply_group_paths, sync_user_groups)
+
+        realm_access = _claim(tokens, "realm_access")
+        resource_access = _claim(tokens, "resource_access")
+        names: dict[str, list[str]] | None
+        if isinstance(realm_access, dict) or isinstance(resource_access, dict):
+            realm_access = realm_access if isinstance(realm_access, dict) else {}
+            resource_access = resource_access if isinstance(resource_access, dict) else {}
+            names = {REALM: [str(name) for name in realm_access.get("roles") or []]}
+            for client_id in role_clients():
+                # Keycloak omits a client from resource_access when the user holds no role on it.
+                entry = resource_access.get(client_id)
+                roles = entry.get("roles") if isinstance(entry, dict) else None
+                names[client_id] = [str(name) for name in roles or []]
+            logger.debug("Applying roles from the realm_access/resource_access claims for %s", user.pk)
+        elif app_settings.SYNC_ROLES or app_settings.STAFF_ROLES or app_settings.SUPERUSER_ROLES:
+            logger.debug("No role claims; reading roles from the Admin API for %s", user.pk)
+            names = read_user_roles(user)
         else:
-            logger.debug("No 'groups' claim; reading membership from the Admin API for %s", user.pk)
-            sync_user_groups(user)
+            names = None
+
+        changed: list[str] = []
+        if names is not None:
+            if app_settings.SYNC_ROLES:
+                apply_role_names(user, names)
+            changed = apply_flag_roles(user, names)
+
+        user.authorization_synced_at = issued_at or timezone.now()
+        user.save(update_fields=[*changed, "authorization_synced_at"])
     except Exception as exc:
-        # Group synchronisation must never break a login.
-        logger.warning("Could not synchronise groups at login for %s: %s", user.pk, scrub_exception(exc))
+        # Authorization synchronisation must never break a login.
+        logger.warning("Could not synchronise authorization at login for %s: %s", user.pk, scrub_exception(exc))
+
+
+def _sync_groups_from_claims(user: Any, tokens: dict[str, Any], apply_group_paths: Any, sync_user_groups: Any) -> None:
+    """Prefer a ``groups`` claim; fall back to the Admin API only if there is none."""
+    claim = _claim(tokens, "groups")
+    if claim:
+        paths = [str(entry) if str(entry).startswith("/") else f"/{entry}" for entry in claim]
+        logger.debug("Applying group membership from the 'groups' claim for %s", user.pk)
+        apply_group_paths(user, paths)
+    else:
+        logger.debug("No 'groups' claim; reading membership from the Admin API for %s", user.pk)
+        sync_user_groups(user)
 
 
 def user_login(request: Any, user: Any) -> None:

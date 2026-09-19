@@ -8,7 +8,7 @@ from unittest import mock
 import pytest
 from django.contrib.auth import get_user_model
 
-from django_pyoidc_keycloak.models import KeycloakGroup
+from django_pyoidc_keycloak.models import KeycloakGroup, KeycloakRole
 from django_pyoidc_keycloak.signals import user_anonymized, user_created, user_deleted, user_synced
 from django_pyoidc_keycloak.sync.users import anonymize, apply_representation, delete_or_anonymize, sync_user
 from tests.conftest import kc_user
@@ -23,6 +23,10 @@ def client_stub():
     stub = mock.Mock()
     stub.get_user_groups.return_value = []
     stub.get_user_realm_roles.return_value = []
+    stub.get_user_client_roles.return_value = []
+    stub.list_realm_roles.return_value = []
+    stub.list_client_roles.return_value = []
+    stub.find_client.return_value = None
     return stub
 
 
@@ -114,14 +118,47 @@ def test_created_timestamp_becomes_date_joined(client_stub):
     assert user.date_joined.year == 2023
 
 
-def test_roles_map_to_staff_and_superuser(client_stub, settings):
-    settings.KEYCLOAK = {**settings.KEYCLOAK, "STAFF_ROLES": ["support"], "SUPERUSER_ROLES": ["admin"]}
+def test_client_roles_map_to_staff_and_superuser(client_stub):
+    """The defaults: app-staff and app-superuser on the OIDC client itself."""
+    client_stub.find_client.return_value = {"id": "client-uuid", "clientId": "django-app"}
+    client_stub.get_user_client_roles.return_value = [{"name": "app-staff"}]
+
+    user = sync_user(kc_user(), client=client_stub)
+
+    assert user.is_staff is True
+    assert user.is_superuser is False
+    assert user.authorization_synced_at is not None
+
+
+def test_a_realm_role_reference_needs_the_prefix(client_stub, settings):
+    settings.KEYCLOAK = {**settings.KEYCLOAK, "STAFF_ROLES": ["realm:support"], "SUPERUSER_ROLES": ["realm:admin"]}
     client_stub.get_user_realm_roles.return_value = [{"name": "support"}]
 
     user = sync_user(kc_user(), client=client_stub)
 
     assert user.is_staff is True
     assert user.is_superuser is False
+
+
+def test_a_bare_reference_does_not_match_a_realm_role(client_stub, settings):
+    settings.KEYCLOAK = {**settings.KEYCLOAK, "STAFF_ROLES": ["support"]}
+    client_stub.get_user_realm_roles.return_value = [{"name": "support"}]
+
+    user = sync_user(kc_user(), client=client_stub)
+
+    assert user.is_staff is False
+
+
+def test_an_unreadable_role_mapping_leaves_the_flags_alone(client_stub):
+    client_stub.get_user_realm_roles.side_effect = RuntimeError("boom")
+    user = sync_user(kc_user(), client=client_stub)
+    user.is_staff = True
+    user.save()
+
+    sync_user(kc_user(id=str(user.keycloak_id)), client=client_stub)
+
+    user.refresh_from_db()
+    assert user.is_staff is True
 
 
 def test_sync_emits_created_then_synced(client_stub):
@@ -165,14 +202,17 @@ def test_anonymises_when_a_protected_row_blocks_deletion(client_stub):
     assert ProtectedDocument.objects.count() == 1
 
 
-def test_anonymising_drops_group_memberships(client_stub):
+def test_anonymising_drops_group_memberships_and_role_assignments(client_stub):
     user = sync_user(kc_user(), client=client_stub)
     group = KeycloakGroup.objects.create(name="staff", path="/staff")
+    role = KeycloakRole.objects.create(name="feature1-viewer", client_id="django-app")
     user.memberships.create(group=group)
+    user.role_assignments.create(role=role)
 
     anonymize(user)
 
     assert user.memberships.count() == 0
+    assert user.role_assignments.count() == 0
 
 
 def test_deletion_signals_carry_the_identity(client_stub):

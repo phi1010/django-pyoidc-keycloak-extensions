@@ -93,6 +93,10 @@ def test_syncing_a_user_logs_without_leaking_the_account(debug_logs, connection)
     stub.connection = connection
     stub.get_user_groups.return_value = []
     stub.get_user_realm_roles.return_value = []
+    stub.get_user_client_roles.return_value = []
+    stub.list_realm_roles.return_value = []
+    stub.list_client_roles.return_value = []
+    stub.find_client.return_value = None
 
     user = sync_user(sentinel_user(), client=stub, create=True, sync_groups=False)
 
@@ -105,6 +109,10 @@ def test_the_changed_field_names_are_logged_but_not_their_values(debug_logs, con
     stub.connection = connection
     stub.get_user_groups.return_value = []
     stub.get_user_realm_roles.return_value = []
+    stub.get_user_client_roles.return_value = []
+    stub.list_realm_roles.return_value = []
+    stub.list_client_roles.return_value = []
+    stub.find_client.return_value = None
     representation = sentinel_user()
 
     sync_user(representation, client=stub, create=True, sync_groups=False)
@@ -152,6 +160,32 @@ def test_membership_reconciliation_logs_without_the_user(debug_logs):
     assert_clean(debug_logs, expect_records_from="django_pyoidc_keycloak.sync.groups")
 
 
+def test_role_synchronisation_logs_names_and_counts(debug_logs, connection):
+    from django_pyoidc_keycloak.sync.roles import sync_roles
+
+    stub = mock.Mock()
+    stub.connection = connection
+    stub.list_realm_roles.return_value = [{"id": str(uuid.uuid4()), "name": "app-admin"}]
+    stub.find_client.return_value = {"id": str(uuid.uuid4()), "clientId": "django-app"}
+    stub.list_client_roles.return_value = [{"id": str(uuid.uuid4()), "name": "feature1-viewer"}]
+
+    sync_roles(client=stub)
+
+    assert "feature1-viewer" in debug_logs.text, "role names are realm configuration and are worth logging"
+    assert_clean(debug_logs, expect_records_from="django_pyoidc_keycloak.sync.roles")
+
+
+def test_role_reconciliation_logs_without_the_user(debug_logs):
+    from django_pyoidc_keycloak.sync.roles import apply_flag_roles, apply_role_names
+
+    user = get_user_model().objects.create_user(username=UNAME, email=EMAIL, keycloak_id=uuid.uuid4())
+
+    apply_role_names(user, {"django-app": ["feature1-viewer"]})
+    apply_flag_roles(user, {"django-app": ["app-staff"]})
+
+    assert_clean(debug_logs, expect_records_from="django_pyoidc_keycloak.sync.roles")
+
+
 # -- reconcile and events -----------------------------------------------
 
 
@@ -161,6 +195,10 @@ def test_a_full_reconcile_logs_progress_without_leaking(debug_logs, connection):
     stub.list_groups.return_value = []
     stub.get_user_groups.return_value = []
     stub.get_user_realm_roles.return_value = []
+    stub.get_user_client_roles.return_value = []
+    stub.list_realm_roles.return_value = []
+    stub.list_client_roles.return_value = []
+    stub.find_client.return_value = None
     stub.iter_users.return_value = iter([sentinel_user()])
 
     full_reconcile(client=stub, import_all=True)
@@ -215,6 +253,10 @@ def test_syncing_a_named_set_of_users_logs_ids_only(debug_logs, connection):
     stub.connection = connection
     stub.get_user_groups.return_value = []
     stub.get_user_realm_roles.return_value = []
+    stub.get_user_client_roles.return_value = []
+    stub.list_realm_roles.return_value = []
+    stub.list_client_roles.return_value = []
+    stub.find_client.return_value = None
     stub.get_user.return_value = sentinel_user()
     user = get_user_model().objects.create_user(username=UNAME, email=EMAIL, keycloak_id=uuid.uuid4())
 

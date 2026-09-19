@@ -118,7 +118,16 @@ def test_a_concurrent_claim_on_the_same_username_does_not_500(monkeypatch):
 
     user_model = get_user_model()
     user_model.objects.create_user(username="alice")  # the winner of the race
-    stub = type("S", (), {"get_user_groups": lambda *a, **k: [], "get_user_realm_roles": lambda *a, **k: []})()
+    stub = type(
+        "S",
+        (),
+        {
+            "get_user_groups": lambda *a, **k: [],
+            "get_user_realm_roles": lambda *a, **k: [],
+            "get_user_client_roles": lambda *a, **k: [],
+            "find_client": lambda *a, **k: None,
+        },
+    )()
     representation = {"id": str(uuid.uuid4()), "username": "alice"}
 
     real_derive = usernames_module.derive_username

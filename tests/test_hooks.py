@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -12,7 +12,7 @@ from django.test import RequestFactory
 from django_pyoidc.models import OIDCSession
 
 from django_pyoidc_keycloak.hooks import get_user, session_logout, user_login, user_logout
-from django_pyoidc_keycloak.models import KeycloakGroup, OIDCTokenSet
+from django_pyoidc_keycloak.models import KeycloakGroup, KeycloakRole, OIDCTokenSet
 from django_pyoidc_keycloak.tokens.store import PENDING_ATTR
 
 pytestmark = pytest.mark.django_db
@@ -157,7 +157,16 @@ def test_a_login_does_not_wipe_attributes_fetched_by_the_admin_api():
     """Claims carry no `attributes` key; absence is not emptiness."""
     from django_pyoidc_keycloak.sync.users import sync_user
 
-    stub = type("S", (), {"get_user_groups": lambda *a, **k: [], "get_user_realm_roles": lambda *a, **k: []})()
+    stub = type(
+        "S",
+        (),
+        {
+            "get_user_groups": lambda *a, **k: [],
+            "get_user_realm_roles": lambda *a, **k: [],
+            "get_user_client_roles": lambda *a, **k: [],
+            "find_client": lambda *a, **k: None,
+        },
+    )()
     user = sync_user({"id": SUB, "username": "alice", "attributes": {"department": ["ops"]}}, client=stub)
 
     get_user(_Client(), tokens_for())
@@ -173,3 +182,109 @@ def test_a_groups_claim_cannot_reach_a_local_only_group():
     user = get_user(_Client(), tokens_for(groups=["/admins"]))
 
     assert user.memberships.count() == 0
+
+
+# -- roles and the staff flags at login -----------------------------------
+
+
+def managed_role(name, client_id="django-app"):
+    return KeycloakRole.objects.create(name=name, client_id=client_id, keycloak_id=uuid.uuid4())
+
+
+def test_roles_come_from_the_claims_without_an_api_call():
+    managed_role("feature1-viewer")
+    managed_role("app-admin", client_id="")
+
+    user = get_user(
+        _Client(),
+        tokens_for(
+            realm_access={"roles": ["app-admin", "offline_access"]},
+            resource_access={"django-app": {"roles": ["feature1-viewer"]}, "account": {"roles": ["view-profile"]}},
+        ),
+    )
+
+    assert set(user.roles.values_list("name", flat=True)) == {"feature1-viewer", "app-admin"}
+
+
+def test_the_staff_flags_are_set_at_login_from_the_client_roles():
+    user = get_user(_Client(), tokens_for(resource_access={"django-app": {"roles": ["app-staff"]}}))
+
+    assert user.is_staff is True
+    assert user.is_superuser is False
+    assert user.authorization_synced_at is not None
+
+
+def test_a_client_missing_from_resource_access_holds_no_roles():
+    """Keycloak omits the client entirely when the user has no role on it."""
+    managed_role("app-staff")
+    user = get_user(_Client(), tokens_for(resource_access={"django-app": {"roles": ["app-staff"]}}))
+    assert user.is_staff is True
+
+    user = get_user(_Client(), tokens_for(resource_access={"account": {"roles": ["view-profile"]}}))
+
+    assert user.is_staff is False
+    assert user.roles.count() == 0
+
+
+def test_a_realm_role_reference_reads_realm_access(settings):
+    settings.KEYCLOAK = {**settings.KEYCLOAK, "STAFF_ROLES": ["realm:app-staff"]}
+
+    user = get_user(_Client(), tokens_for(realm_access={"roles": ["app-staff"]}))
+
+    assert user.is_staff is True
+
+
+def test_a_resource_access_claim_cannot_reach_a_local_only_role():
+    KeycloakRole.objects.create(name="feature1-editor", client_id="django-app")
+
+    user = get_user(_Client(), tokens_for(resource_access={"django-app": {"roles": ["feature1-editor"]}}))
+
+    assert user.role_assignments.count() == 0
+
+
+# -- reconciled data that is newer than the token ---------------------------
+
+
+def _stamp(user, when):
+    type(user).objects.filter(pk=user.pk).update(authorization_synced_at=when)
+
+
+def test_a_token_older_than_the_last_reconcile_does_not_touch_authorization():
+    staff = KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
+    issued = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    user = get_user(_Client(), tokens_for(iat=int(issued.timestamp()), groups=["/staff"]))
+    user.memberships.all().delete()
+    _stamp(user, issued + timedelta(minutes=5))
+
+    user = get_user(
+        _Client(),
+        tokens_for(
+            iat=int(issued.timestamp()), groups=["/staff"], resource_access={"django-app": {"roles": ["app-staff"]}}
+        ),
+    )
+
+    assert not user.memberships.filter(group=staff).exists()
+    assert user.is_staff is False
+    assert user.authorization_synced_at == issued + timedelta(minutes=5)
+
+
+def test_a_token_newer_than_the_last_reconcile_is_applied():
+    KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
+    issued = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    user = get_user(_Client(), tokens_for())
+    _stamp(user, issued - timedelta(minutes=5))
+
+    user = get_user(_Client(), tokens_for(iat=int(issued.timestamp()), groups=["/staff"]))
+
+    assert user.memberships.get().group.path == "/staff"
+    assert user.authorization_synced_at == issued
+
+
+def test_a_token_without_iat_is_applied_and_stamped_now():
+    KeycloakGroup.objects.create(name="staff", path="/staff", keycloak_id=uuid.uuid4())
+    user = get_user(_Client(), tokens_for())
+    _stamp(user, datetime(2030, 1, 1, tzinfo=UTC))
+
+    user = get_user(_Client(), tokens_for(groups=["/staff"]))
+
+    assert user.memberships.count() == 1

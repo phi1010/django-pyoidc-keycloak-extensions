@@ -9,7 +9,8 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
-from django_pyoidc_keycloak.models import GroupMembership, KeycloakGroup, OIDCTokenSet, SyncRun
+from django_pyoidc_keycloak.hooks import get_user
+from django_pyoidc_keycloak.models import GroupMembership, KeycloakGroup, KeycloakRole, OIDCTokenSet, SyncRun
 from django_pyoidc_keycloak.models.base import MembershipSource
 from django_pyoidc_keycloak.sync.events import poll_admin_events, poll_user_events
 from django_pyoidc_keycloak.sync.reconcile import full_reconcile
@@ -40,6 +41,105 @@ def test_reconcile_imports_the_realm(admin_client_real, keycloak_settings):
     membership = alice.memberships.get()
     assert membership.group.path == "/staff"
     assert membership.source == MembershipSource.KEYCLOAK
+
+
+def test_reconcile_mirrors_roles_and_assignments(admin_client_real, keycloak_settings):
+    """Realm roles and the OIDC client's roles land locally; other clients' roles do not."""
+    full_reconcile(client=admin_client_real, import_all=True)
+
+    assert KeycloakRole.objects.get(name="app-admin").client_id == ""
+    assert KeycloakRole.objects.get(name="feature1-viewer").client_id == CLIENT_ID
+    assert not KeycloakRole.objects.filter(client_id=EXCHANGE_TARGET).exists()
+    assert not KeycloakRole.objects.filter(client_id="realm-management").exists()
+
+    user_model = get_user_model()
+    alice = user_model.objects.get(username="alice")
+    assert list(alice.roles.values_list("name", flat=True)) == ["feature1-viewer"]
+    assert alice.is_staff is False
+
+    admin = user_model.objects.get(username="admin")
+    assert admin.is_staff is True
+    assert admin.is_superuser is True
+    assert admin.has_role("app-admin")
+    assert admin.has_role("feature1-editor", CLIENT_ID)
+    assert admin.authorization_synced_at is not None
+
+
+def test_a_role_mapping_change_arrives_through_events(admin_client_real, keycloak_settings, ops):
+    full_reconcile(client=admin_client_real, import_all=True)
+    poll_admin_events(client=admin_client_real)
+    carol = get_user_model().objects.get(username="carol")
+
+    ops.add_client_role(str(carol.keycloak_id), "app-staff")
+    poll_admin_events(client=admin_client_real)
+
+    carol.refresh_from_db()
+    assert carol.is_staff is True
+    assert carol.has_role("app-staff", CLIENT_ID)
+
+    ops.remove_client_role(str(carol.keycloak_id), "app-staff")
+    poll_admin_events(client=admin_client_real)
+
+    carol.refresh_from_db()
+    assert carol.is_staff is False
+    assert carol.roles.count() == 0
+
+
+def _claims_of(jwt: str) -> dict:
+    import base64
+    import json
+
+    payload = jwt.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload))
+
+
+def test_a_login_applies_roles_and_flags_from_the_id_token(admin_client_real, keycloak_settings, ops):
+    """The mappers put realm_access and resource_access into the ID token, so no Admin API call is needed."""
+    full_reconcile(client=admin_client_real, import_all=True)
+    grant = ops.password_grant("admin", "admin-password")
+    claims = _claims_of(grant["id_token"])
+    assert "app-staff" in claims["resource_access"][CLIENT_ID]["roles"]
+    assert "app-admin" in claims["realm_access"]["roles"]
+
+    admin = get_user_model().objects.get(username="admin")
+    admin.role_assignments.all().delete()
+    admin.is_staff = admin.is_superuser = False
+    admin.authorization_synced_at = None
+    admin.save()
+
+    user = get_user(None, {"id_token_claims": claims})
+
+    assert user.pk == admin.pk
+    assert user.is_staff is True
+    assert user.is_superuser is True
+    assert set(user.roles.values_list("name", flat=True)) == {
+        "app-admin",
+        "app-staff",
+        "app-superuser",
+        "feature1-viewer",
+        "feature1-editor",
+    }
+
+
+def test_a_reconcile_after_the_token_was_issued_wins_at_login(admin_client_real, keycloak_settings, ops):
+    full_reconcile(client=admin_client_real, import_all=True)
+    grant = ops.password_grant("admin", "admin-password")
+    claims = _claims_of(grant["id_token"])
+
+    # Between issuance and login, Keycloak changes and a reconcile picks it up.
+    admin = get_user_model().objects.get(username="admin")
+    ops.remove_client_role(str(admin.keycloak_id), "app-superuser")
+    full_reconcile(client=admin_client_real, import_all=True)
+    admin.refresh_from_db()
+    assert admin.is_superuser is False
+
+    user = get_user(None, {"id_token_claims": claims})
+
+    assert user.is_superuser is False, "the stale token must not resurrect the revoked flag"
+    assert not user.has_role("app-superuser", CLIENT_ID)
+
+    ops.add_client_role(str(admin.keycloak_id), "app-superuser")  # leave the realm as we found it
 
 
 def test_the_service_account_user_is_not_listed_by_keycloak(admin_client_real, keycloak_settings):

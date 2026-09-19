@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 USER_RESOURCE_TYPES = {"USER", "GROUP_MEMBERSHIP", "REALM_ROLE_MAPPING", "CLIENT_ROLE_MAPPING"}
 GROUP_RESOURCE_TYPES = {"GROUP"}
+ROLE_RESOURCE_TYPES = {"REALM_ROLE", "CLIENT_ROLE"}
 
 #: Account-console self-service actions that change data we mirror.
 USER_EVENT_TYPES = ["UPDATE_PROFILE", "UPDATE_EMAIL", "UPDATE_PASSWORD", "VERIFY_EMAIL", "REGISTER"]
@@ -160,6 +161,13 @@ def _handle_admin_event(event: dict[str, Any], *, client, run) -> None:
 
         logger.debug("Group event on %s; re-reading the whole group tree", path or "?")
         sync_groups(client=client)
+        return
+
+    if resource_type in ROLE_RESOURCE_TYPES:
+        from django_pyoidc_keycloak.sync.roles import sync_roles
+
+        logger.debug("Role event on %s; re-reading the role catalogue", path or "?")
+        sync_roles(client=client)
         return
 
     if resource_type not in USER_RESOURCE_TYPES:

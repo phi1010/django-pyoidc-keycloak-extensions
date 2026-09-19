@@ -71,7 +71,12 @@ def sync_users_task(user_pks: list[str]) -> dict[str, int]:
 @shared_task(name="keycloak.purge_tokens")
 def purge_tokens_task() -> dict[str, int]:
     from django_pyoidc_keycloak.sync.groups import sweep_expired_memberships
+    from django_pyoidc_keycloak.sync.roles import sweep_expired_role_assignments
     from django_pyoidc_keycloak.tokens.store import purge_orphans
 
     logger.debug("Celery task keycloak.purge_tokens starting")
-    return {"tokens": purge_orphans(), "memberships": sweep_expired_memberships()}
+    return {
+        "tokens": purge_orphans(),
+        "memberships": sweep_expired_memberships(),
+        "role_assignments": sweep_expired_role_assignments(),
+    }

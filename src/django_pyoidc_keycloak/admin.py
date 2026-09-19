@@ -29,7 +29,14 @@ from django.views.decorators.http import require_POST
 
 from django_pyoidc_keycloak.admin_api.exceptions import KeycloakError, KeycloakUserNotFound
 from django_pyoidc_keycloak.conf import app_settings
-from django_pyoidc_keycloak.models import GroupMembership, KeycloakGroup, KeycloakUser, SyncRun
+from django_pyoidc_keycloak.models import (
+    GroupMembership,
+    KeycloakGroup,
+    KeycloakRole,
+    KeycloakUser,
+    RoleAssignment,
+    SyncRun,
+)
 from django_pyoidc_keycloak.models.base import MembershipSource
 from django_pyoidc_keycloak.sync.reconcile import sync_users
 from django_pyoidc_keycloak.sync.users import handle_missing_user, sync_user
@@ -54,8 +61,11 @@ KEYCLOAK_OWNED_USER_FIELDS = (
     "is_active",
     "date_joined",
     "last_synced_at",
+    "authorization_synced_at",
     "keycloak_attributes",
     "is_anonymized",
+    "created_at",
+    "updated_at",
 )
 
 
@@ -111,13 +121,24 @@ class GroupMembershipInline(admin.TabularInline):
         return self.readonly_fields
 
 
+class RoleAssignmentInline(admin.TabularInline):
+    """Role assignments on the user page. Keycloak-sourced rows cannot be edited here."""
+
+    model = RoleAssignment
+    fk_name = "user"
+    extra = 0
+    autocomplete_fields = ["role"]
+    fields = ("role", "source", "expires_at", "note", "created_by", "created_at")
+    readonly_fields = ("created_at",)
+
+
 @admin.register(KeycloakUser)
 class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
     list_display = ("username", "email", "is_active", "is_staff", "is_superuser", "managed", "last_synced_at")
     list_filter = (ManagedFilter, "is_active", "is_staff", "is_superuser", "is_anonymized")
     search_fields = ("username", "email", "first_name", "last_name", "keycloak_id")
     ordering = ("username",)
-    inlines = [GroupMembershipInline]
+    inlines = [GroupMembershipInline, RoleAssignmentInline]
     actions = ["action_sync_selected", "action_sync_all"]
 
     fieldsets = (
@@ -133,12 +154,25 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
                 ),
             },
         ),
-        (_("Keycloak"), {"fields": ("keycloak_attributes", "date_joined", "last_synced_at", "is_anonymized")}),
+        (
+            _("Keycloak"),
+            {
+                "fields": (
+                    "keycloak_attributes",
+                    "date_joined",
+                    "last_synced_at",
+                    "authorization_synced_at",
+                    "is_anonymized",
+                    "created_at",
+                    "updated_at",
+                )
+            },
+        ),
         (_("Tokens"), {"fields": ("token_status",)}),
     )
 
     def get_readonly_fields(self, request: HttpRequest, obj: Any = None) -> tuple[str, ...]:
-        readonly = ["id", "token_status"]
+        readonly = ["id", "token_status", "created_at", "updated_at"]
         if obj is not None and obj.keycloak_id is not None:
             # One-way synchronisation: editing these would be undone on the next pass.
             readonly.extend(KEYCLOAK_OWNED_USER_FIELDS)
@@ -221,7 +255,7 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
         return HttpResponseRedirect(reverse("admin:keycloak_keycloakuser_change", args=[object_id]))
 
     def save_formset(self, request: HttpRequest, form: Any, formset: Any, change: bool) -> None:
-        """Memberships added on this page are manual overrides, like those added on their own page.
+        """Memberships and assignments added here are manual overrides, like those added on their own page.
 
         Without this they would inherit no author and read as ordinary rows; the model default
         already keeps synchronisation from revoking them.
@@ -230,7 +264,7 @@ class KeycloakUserAdmin(SyncPermissionMixin, admin.ModelAdmin):
         for obj in formset.deleted_objects:
             obj.delete()
         for instance in instances:
-            if isinstance(instance, GroupMembership) and instance._state.adding:
+            if isinstance(instance, GroupMembership | RoleAssignment) and instance._state.adding:
                 instance.source = MembershipSource.MANUAL
                 instance.created_by = request.user
             instance.save()
@@ -327,15 +361,42 @@ class KeycloakGroupAdmin(admin.ModelAdmin):
         return ("id",)
 
 
-@admin.register(GroupMembership)
-class GroupMembershipAdmin(admin.ModelAdmin):
-    """Membership as its own page, so a temporary override can be granted and audited."""
+@admin.register(KeycloakRole)
+class KeycloakRoleAdmin(admin.ModelAdmin):
+    list_display = ("__str__", "client_id", "name", "managed", "composite", "assignment_count", "last_synced_at")
+    list_filter = ("client_id", "composite", "last_synced_at")
+    search_fields = ("name", "client_id", "keycloak_id")
+    ordering = ("client_id", "name")
 
-    list_display = ("user", "group", "source", "expires_at", "expired", "created_by", "created_at")
-    list_filter = ("source",)
-    search_fields = ("user__username", "group__path", "note")
-    autocomplete_fields = ("user", "group")
+    @admin.display(boolean=True, description=_("Keycloak"))
+    def managed(self, obj: Any) -> bool:
+        return obj.keycloak_id is not None
+
+    @admin.display(description=_("assignments"))
+    def assignment_count(self, obj: Any) -> int:
+        return obj.assignments.count()
+
+    def get_readonly_fields(self, request: HttpRequest, obj: Any = None) -> tuple[str, ...]:
+        if obj is not None and obj.keycloak_id is not None:
+            return (
+                "id",
+                "keycloak_id",
+                "name",
+                "client_id",
+                "description",
+                "composite",
+                "keycloak_attributes",
+                "last_synced_at",
+            )
+        return ("id",)
+
+
+class GrantAdmin(admin.ModelAdmin):
+    """Shared behaviour of the membership and assignment pages."""
+
     readonly_fields = ("created_at",)
+    #: The FK to the granted object, ``group`` or ``role``.
+    target_field = ""
 
     @admin.display(boolean=True, description=_("expired"))
     def expired(self, obj: Any) -> bool:
@@ -350,8 +411,30 @@ class GroupMembershipAdmin(admin.ModelAdmin):
 
     def get_readonly_fields(self, request: HttpRequest, obj: Any = None) -> tuple[str, ...]:
         if obj is not None and obj.source == MembershipSource.KEYCLOAK:
-            return ("user", "group", "source", "created_at", "created_by")
+            return ("user", self.target_field, "source", "created_at", "created_by")
         return self.readonly_fields
+
+
+@admin.register(RoleAssignment)
+class RoleAssignmentAdmin(GrantAdmin):
+    """Assignment as its own page, so a temporary override can be granted and audited."""
+
+    target_field = "role"
+    list_display = ("user", "role", "source", "expires_at", "expired", "created_by", "created_at")
+    list_filter = ("source", "role__client_id")
+    search_fields = ("user__username", "role__name", "role__client_id", "note")
+    autocomplete_fields = ("user", "role")
+
+
+@admin.register(GroupMembership)
+class GroupMembershipAdmin(GrantAdmin):
+    """Membership as its own page, so a temporary override can be granted and audited."""
+
+    target_field = "group"
+    list_display = ("user", "group", "source", "expires_at", "expired", "created_by", "created_at")
+    list_filter = ("source",)
+    search_fields = ("user__username", "group__path", "note")
+    autocomplete_fields = ("user", "group")
 
 
 @admin.register(SyncRun)

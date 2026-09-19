@@ -18,6 +18,7 @@ from django_pyoidc_keycloak.models import KeycloakUser
 from django_pyoidc_keycloak.models.sync import SyncKind
 from django_pyoidc_keycloak.scrub import scrub_exception
 from django_pyoidc_keycloak.sync.groups import sweep_expired_memberships, sync_groups
+from django_pyoidc_keycloak.sync.roles import sweep_expired_role_assignments, sync_roles
 from django_pyoidc_keycloak.sync.runs import record_error, sync_run
 from django_pyoidc_keycloak.sync.users import handle_missing_user, sync_user
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def full_reconcile(*, client=None, import_all: bool | None = None, dry_run: bool = False) -> dict[str, int]:
-    """Bring every local user and group into line with the realm.
+    """Bring every local user, group and role into line with the realm.
 
     Users with ``keycloak_id IS NULL`` are unmanaged and never touched.  Users already
     flagged ``is_anonymized`` are skipped: their Keycloak account is gone by definition, so
@@ -36,7 +37,7 @@ def full_reconcile(*, client=None, import_all: bool | None = None, dry_run: bool
     if import_all is None:
         import_all = bool(app_settings.IMPORT_ALL_USERS)
 
-    stats = {"created": 0, "updated": 0, "deleted": 0, "anonymized": 0, "skipped": 0, "groups": 0}
+    stats = {"created": 0, "updated": 0, "deleted": 0, "anonymized": 0, "skipped": 0, "groups": 0, "roles": 0}
 
     logger.info(
         "Starting a full reconcile of realm %s (import_all=%s, dry_run=%s)",
@@ -49,6 +50,9 @@ def full_reconcile(*, client=None, import_all: bool | None = None, dry_run: bool
         if app_settings.SYNC_GROUPS and not dry_run:
             group_counts = sync_groups(client=client)
             stats["groups"] = group_counts["created"] + group_counts["updated"]
+        if app_settings.SYNC_ROLES and not dry_run:
+            role_counts = sync_roles(client=client)
+            stats["roles"] = role_counts["created"] + role_counts["updated"]
 
         seen_ids: set[str] = set()
         for representation in client.iter_users():
@@ -89,6 +93,7 @@ def full_reconcile(*, client=None, import_all: bool | None = None, dry_run: bool
 
         if not dry_run:
             sweep_expired_memberships()
+            sweep_expired_role_assignments()
 
     logger.info("Full reconcile of realm %s finished: %s", client.connection.realm, stats)
     return stats

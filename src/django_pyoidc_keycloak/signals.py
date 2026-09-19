@@ -25,5 +25,11 @@ group_synced = django.dispatch.Signal()
 #: Group membership changed. kwargs: user, group, action ("added"/"removed"), source
 membership_changed = django.dispatch.Signal()
 
+#: A role was created or refreshed from Keycloak. kwargs: role, representation
+role_synced = django.dispatch.Signal()
+
+#: Role assignment changed. kwargs: user, role, action ("added"/"removed"), source
+role_assignment_changed = django.dispatch.Signal()
+
 #: A synchronisation pass ended, successfully or not. kwargs: sync_run
 sync_run_finished = django.dispatch.Signal()

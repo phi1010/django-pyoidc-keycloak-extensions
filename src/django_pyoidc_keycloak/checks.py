@@ -236,3 +236,74 @@ def check_cache_backend(app_configs: Any, **kwargs: Any) -> list:
             id="keycloak.E008",
         )
     ]
+
+
+@register()
+def check_model_base(app_configs: Any, **kwargs: Any) -> list:
+    """A swapped-in model base may only add columns to models the project also swapped.
+
+    The library ships migrations for its concrete models, and they know nothing about the
+    extra columns a custom base declares; ``migrate`` would leave the tables short.
+    """
+    from django.apps import apps
+
+    from django_pyoidc_keycloak.models.base import MODEL_BASE_FIELDS, ModelBase
+
+    extra = sorted(f.name for f in ModelBase._meta.local_fields if f.name not in MODEL_BASE_FIELDS)
+    extra += sorted(f.name for f in ModelBase._meta.local_many_to_many)
+    if not extra:
+        return []
+
+    library_defaults = {
+        app_settings.user_model: "keycloak.KeycloakUser",
+        app_settings.group_model: "keycloak.KeycloakGroup",
+        app_settings.membership_model: "keycloak.GroupMembership",
+        app_settings.role_model: "keycloak.KeycloakRole",
+        app_settings.role_assignment_model: "keycloak.RoleAssignment",
+    }
+    unswapped = sorted(
+        label
+        for label, default in library_defaults.items()
+        if label.lower() == default.lower() and apps.is_installed("django_pyoidc_keycloak")
+    )
+    if not unswapped:
+        return []
+    return [
+        Error(
+            f"KEYCLOAK_MODEL_BASE {app_settings.model_base!r} adds the field(s) {', '.join(extra)}, but "
+            f"{', '.join(unswapped)} still use the library's own migrations.",
+            hint=(
+                "Subclass the abstract models in your own app, point AUTH_USER_MODEL and the "
+                "KEYCLOAK_*_MODEL settings at them, and run makemigrations there. The library's "
+                "migrations cannot know about columns your base class adds."
+            ),
+            id="keycloak.E009",
+        )
+    ]
+
+
+@register()
+def check_role_references(app_configs: Any, **kwargs: Any) -> list:
+    """Every STAFF_ROLES / SUPERUSER_ROLES entry must name a client whose roles are mirrored."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    from django_pyoidc_keycloak.sync.roles import REALM, parse_role_reference, role_clients
+
+    try:
+        clients = set(role_clients())
+    except ImproperlyConfigured:
+        return []  # the connection checks report that one
+    problems: list[Error | Warning] = []
+    for setting in ("STAFF_ROLES", "SUPERUSER_ROLES"):
+        for entry in app_settings.get(setting) or []:
+            client_id, _name = parse_role_reference(str(entry), next(iter(sorted(clients))))
+            if client_id != REALM and client_id not in clients:
+                problems.append(
+                    Error(
+                        f"KEYCLOAK[{setting!r}] entry {entry!r} names client {client_id!r}, "
+                        "whose roles are not mirrored.",
+                        hint="Add that client to KEYCLOAK['ROLE_CLIENTS'], or use 'realm:<name>' for a realm role.",
+                        id="keycloak.E010",
+                    )
+                )
+    return problems

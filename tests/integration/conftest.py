@@ -171,6 +171,24 @@ class KeycloakAdminOps:
     def remove_from_group(self, keycloak_id: str, group_id: str) -> None:
         self.client.request("DELETE", f"/users/{keycloak_id}/groups/{group_id}")
 
+    def add_client_role(self, keycloak_id: str, role_name: str) -> None:
+        client = self.client.find_client(CLIENT_ID)
+        role = next(r for r in self.client.list_client_roles(client["id"]) if r["name"] == role_name)
+        self.client.request(
+            "POST",
+            f"/users/{keycloak_id}/role-mappings/clients/{client['id']}",
+            json=[{"id": role["id"], "name": role["name"]}],
+        )
+
+    def remove_client_role(self, keycloak_id: str, role_name: str) -> None:
+        client = self.client.find_client(CLIENT_ID)
+        role = next(r for r in self.client.list_client_roles(client["id"]) if r["name"] == role_name)
+        self.client.request(
+            "DELETE",
+            f"/users/{keycloak_id}/role-mappings/clients/{client['id']}",
+            json=[{"id": role["id"], "name": role["name"]}],
+        )
+
     def group_id(self, path: str) -> str:
         for group in self.client.list_groups():
             found = self._find(group, path)

@@ -16,7 +16,6 @@ from django.utils.module_loading import import_string
 from django_pyoidc_keycloak.admin_api.client import get_admin_client
 from django_pyoidc_keycloak.conf import app_settings
 from django_pyoidc_keycloak.models import KeycloakUser
-from django_pyoidc_keycloak.scrub import scrub_exception
 from django_pyoidc_keycloak.signals import user_anonymized, user_created, user_deleted, user_synced
 
 logger = logging.getLogger(__name__)
@@ -40,16 +39,13 @@ def _to_datetime(milliseconds: Any) -> Any:
     return datetime.fromtimestamp(int(milliseconds) / 1000, tz=UTC)
 
 
-def _role_names(client, keycloak_id: str) -> set[str]:
-    try:
-        return {role.get("name", "") for role in client.get_user_realm_roles(keycloak_id)}
-    except Exception as exc:  # a missing role-mapping read must not fail the whole sync
-        logger.warning("Could not read realm roles for %s: %s", keycloak_id, scrub_exception(exc))
-        return set()
-
-
 def apply_representation(user: Any, representation: dict[str, Any], *, client=None) -> list[str]:
-    """Copy Keycloak's view of the account onto the local row. Returns the changed fields."""
+    """Copy Keycloak's view of the account onto the local row. Returns the changed fields.
+
+    Profile fields only: groups, roles and the staff flags are authorization data and are
+    handled by :func:`sync_authorization` so that the login hook can apply the same rules.
+    ``client`` is accepted for backwards compatibility and no longer used.
+    """
     # Keys only: the values are the account's personal data, and this runs on every login.
     logger.debug(
         "Applying a Keycloak representation to user %s; it carries the keys %s",
@@ -90,28 +86,6 @@ def apply_representation(user: Any, representation: dict[str, Any], *, client=No
     if user.username != desired:
         user.username = desired
         changed.append("username")
-
-    staff_roles = set(app_settings.STAFF_ROLES or [])
-    superuser_roles = set(app_settings.SUPERUSER_ROLES or [])
-    if (staff_roles or superuser_roles) and client is not None and representation.get("id"):
-        roles = _role_names(client, str(representation["id"]))
-        logger.debug(
-            "Mapping realm roles for %s: %d role(s) read, %d staff and %d superuser role(s) configured",
-            user.pk,
-            len(roles),
-            len(staff_roles),
-            len(superuser_roles),
-        )
-        if staff_roles:
-            is_staff = bool(roles & staff_roles)
-            if user.is_staff != is_staff:
-                user.is_staff = is_staff
-                changed.append("is_staff")
-        if superuser_roles:
-            is_superuser = bool(roles & superuser_roles)
-            if user.is_superuser != is_superuser:
-                user.is_superuser = is_superuser
-                changed.append("is_superuser")
 
     # Field names only -- never the old or new values.
     logger.debug("Representation changed %d field(s) on user %s: %s", len(changed), user.pk, changed or "none")
@@ -176,18 +150,49 @@ def sync_user(
         kc_id,
     )
 
-    if sync_groups is None:
-        sync_groups = bool(app_settings.SYNC_GROUPS)
-    if sync_groups:
-        from django_pyoidc_keycloak.sync.groups import sync_user_groups
-
-        sync_user_groups(user, client=client)
+    sync_authorization(user, client=client, sync_groups=sync_groups)
 
     if created_now:
         user_created.send(sender=user_model, user=user, representation=representation)
     else:
         user_synced.send(sender=user_model, user=user, representation=representation, changed_fields=changed)
     return user
+
+
+def sync_authorization(
+    user: Any, *, client=None, sync_groups: bool | None = None, sync_roles: bool | None = None
+) -> None:
+    """Groups, role assignments and the staff flags, read from the Admin API.
+
+    Stamps ``authorization_synced_at`` with the read time, which is what lets a later login
+    with an older token know to leave this data alone.
+    """
+    from django_pyoidc_keycloak.sync.groups import sync_user_groups
+    from django_pyoidc_keycloak.sync.roles import apply_flag_roles, apply_role_names, read_user_roles
+
+    if user.keycloak_id is None:
+        return
+    client = client or get_admin_client()
+    if sync_groups is None:
+        sync_groups = bool(app_settings.SYNC_GROUPS)
+    if sync_roles is None:
+        sync_roles = bool(app_settings.SYNC_ROLES)
+
+    if sync_groups:
+        sync_user_groups(user, client=client)
+
+    names = None
+    if sync_roles or app_settings.STAFF_ROLES or app_settings.SUPERUSER_ROLES:
+        names = read_user_roles(user, client=client)
+    if names is not None:
+        if sync_roles:
+            apply_role_names(user, names)
+        changed = apply_flag_roles(user, names)
+    else:
+        changed = []
+
+    user.authorization_synced_at = timezone.now()
+    user.save(update_fields=[*changed, "authorization_synced_at"])
 
 
 def _save_with_username_retry(user: Any, representation: dict[str, Any], attempts: int = 3) -> None:
@@ -239,7 +244,14 @@ def anonymize(user: Any) -> None:
     # re-imported as a fresh user.
     user.save()
     dropped, _ = user.memberships.all().delete()
-    logger.info("Anonymised user %s (keycloak_id %s), dropping %d membership(s)", user.pk, user.keycloak_id, dropped)
+    dropped_roles, _ = user.role_assignments.all().delete()
+    logger.info(
+        "Anonymised user %s (keycloak_id %s), dropping %d membership(s) and %d role assignment(s)",
+        user.pk,
+        user.keycloak_id,
+        dropped,
+        dropped_roles,
+    )
     user_anonymized.send(sender=type(user), user=user)
 
 

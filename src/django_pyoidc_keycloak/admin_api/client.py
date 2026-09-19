@@ -275,7 +275,28 @@ class KeycloakAdminClient:
         return list(self.get_json(f"/users/{keycloak_id}/groups"))
 
     def get_user_realm_roles(self, keycloak_id: str) -> list[dict[str, Any]]:
+        """Effective realm roles, with composites expanded -- what a token would carry."""
         return list(self.get_json(f"/users/{keycloak_id}/role-mappings/realm/composite"))
+
+    def get_user_client_roles(self, keycloak_id: str, client_uuid: str) -> list[dict[str, Any]]:
+        """Effective roles on one client. ``client_uuid`` is Keycloak's id, not the clientId."""
+        return list(self.get_json(f"/users/{keycloak_id}/role-mappings/clients/{client_uuid}/composite"))
+
+    # -- roles and clients ----------------------------------------------
+
+    def list_realm_roles(self) -> list[dict[str, Any]]:
+        return list(self.get_json("/roles", params={"briefRepresentation": False}))
+
+    def find_client(self, client_id: str) -> dict[str, Any] | None:
+        """The client representation for a ``clientId``, or None. Needs ``view-clients``."""
+        matches = list(self.get_json("/clients", params={"clientId": client_id}))
+        for match in matches:
+            if match.get("clientId") == client_id:
+                return match
+        return None
+
+    def list_client_roles(self, client_uuid: str) -> list[dict[str, Any]]:
+        return list(self.get_json(f"/clients/{client_uuid}/roles", params={"briefRepresentation": False}))
 
     # -- groups ---------------------------------------------------------
 
